@@ -29,8 +29,12 @@
 // only if the CPU has to read it after GPU drawing.
 //
 // Setting the environment variable SDLPAL_GPU_VERIFY=1 runs every drawing operation both
-// ways. Each presented frame is then read back and compared with the software result, and
-// any difference is logged as [GPUVERIFY]. Use it after changing any drawing code.
+// ways, so the pixels of a surface hold the software result and its texture the GPU result.
+// Each presented frame and each surface download is compared with the software result, as
+// is the palette worked out during a fade, and any difference is logged as [GPUVERIFY]. Use
+// it after changing any drawing code. Apart from the CPU drawing as well, this takes the
+// same path as a normal run. The one thing it cannot notice is CPU code reading pixels
+// without calling VIDEO_GPU_PrepareCPUAccess() first, since here those pixels are current.
 //
 // Only SPIR-V and MSL shaders are provided, so SDL_GPU never selects D3D12. When neither
 // Vulkan nor Metal is usable VIDEO_GPU_Init() fails and video.c falls back to software
@@ -60,6 +64,8 @@
 #define STAGE_BYTES      (2 * 1024 * 1024)
 #define RING_BYTES       (4 * 1024 * 1024)
 #define VERTEX_RING      (MAX_INSTANCES * 8 * (int)sizeof(GPUINSTANCE))
+#define MAX_BAND_RECTS   16
+#define MAX_SHOWN_RECTS  (1 + 3 * MAX_BAND_RECTS)
 
 #define FNV_OFFSET       0xCBF29CE484222325ULL
 #define FNV_PRIME        0x100000001B3ULL
@@ -169,13 +175,20 @@ static struct
    FADEPARAMS               fade;
    BOOL                     fFadeArmed;      // keep the fade through the next palette change
 
-   SDL_Rect                 blackBand;       // uncovered by shaking the screen
+   // What a shake left uncovered, not overlapping. It stays black until written over.
+   SDL_Rect                 rgBlackBand[MAX_BAND_RECTS];
+   int                      nBlackBand;
 
    // Verification only.
    BYTE                    *pExpectedIndex;
+   BYTE                    *pExpectedBlack;  // nonzero where the software result is the black band
+   SDL_Color                rgExpectedPalette[PALETTE_ENTRIES];
    DWORD                    dwFrames;
    DWORD                    dwIndexMismatches;
    DWORD                    dwColorMismatches;
+   DWORD                    dwPaletteMismatches;
+   DWORD                    dwDownloads;
+   DWORD                    dwDownloadMismatches;
 } gGPU;
 
 static SDL_GPUCommandBuffer *
@@ -192,6 +205,29 @@ VIDEO_GPU_Commands(
       }
    }
    return gGPU.pCommands;
+}
+
+static SDL_GPUTexture *
+VIDEO_GPU_CreateTexture(
+   SDL_GPUTextureFormat     format,
+   SDL_GPUTextureUsageFlags usage,
+   Uint32                   uiWidth,
+   Uint32                   uiHeight
+)
+{
+   SDL_GPUTextureCreateInfo info;
+
+   SDL_zero(info);
+   info.type = SDL_GPU_TEXTURETYPE_2D;
+   info.format = format;
+   info.usage = usage;
+   info.width = uiWidth;
+   info.height = uiHeight;
+   info.layer_count_or_depth = 1;
+   info.num_levels = 1;
+   info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+   return SDL_CreateGPUTexture(gGPU.pDevice, &info);
 }
 
 static BYTE *
@@ -267,6 +303,51 @@ VIDEO_GPU_UploadRegion(
    destination.d = 1;
 
    SDL_UploadToGPUTexture(pCopyPass, &source, &destination, false);
+}
+
+static VOID
+VIDEO_GPU_UploadPixels(
+   SDL_Surface     *pSurface,
+   const SDL_Rect  *pArea,
+   SDL_GPUTexture  *pTexture,
+   const SDL_Point *pPosition
+)
+/*++
+  Purpose:
+
+    Copy an area of the pixels of an 8-bit surface to a texture.
+
+  Parameters:
+
+    [IN]  pSurface - the surface.
+
+    [IN]  pArea - the area to copy.
+
+    [OUT] pTexture - the texture.
+
+    [IN]  pPosition - where to copy to.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   SDL_GPUCopyPass *pCopyPass;
+   BYTE            *pMapped;
+   Uint32           uiOffset;
+   int              y;
+
+   pMapped = VIDEO_GPU_RingMap(pArea->w * pArea->h, &uiOffset);
+   for (y = 0; y < pArea->h; y++)
+   {
+      memcpy(pMapped + y * pArea->w, (const BYTE *)pSurface->pixels + (pArea->y + y) * pSurface->pitch + pArea->x, pArea->w);
+   }
+   SDL_UnmapGPUTransferBuffer(gGPU.pDevice, gGPU.pRing);
+
+   pCopyPass = SDL_BeginGPUCopyPass(VIDEO_GPU_Commands());
+   VIDEO_GPU_UploadRegion(pCopyPass, gGPU.pRing, uiOffset, pTexture, pPosition->x, pPosition->y, pArea->w, pArea->h);
+   SDL_EndGPUCopyPass(pCopyPass);
 }
 
 static VOID
@@ -384,7 +465,10 @@ VIDEO_GPU_FindSurface(
 {
    int i;
 
-   if (gGPU.pDevice != NULL)
+   //
+   // A free slot also holds a NULL surface, but a NULL surface is not on the GPU.
+   //
+   if (gGPU.pDevice != NULL && pSurface != NULL)
    {
       for (i = 0; i < MAX_SURFACES; i++)
       {
@@ -392,6 +476,23 @@ VIDEO_GPU_FindSurface(
          {
             return &gGPU.rgSurfaces[i];
          }
+      }
+   }
+   return NULL;
+}
+
+static GPUSURFACE *
+VIDEO_GPU_FindFreeSlot(
+   VOID
+)
+{
+   int i;
+
+   for (i = 0; i < MAX_SURFACES; i++)
+   {
+      if (gGPU.rgSurfaces[i].pSurface == NULL)
+      {
+         return &gGPU.rgSurfaces[i];
       }
    }
    return NULL;
@@ -416,11 +517,8 @@ VIDEO_GPU_EnsureOnGPU(
 
 --*/
 {
-   SDL_Surface     *pSurface = pEntry->pSurface;
-   SDL_GPUCopyPass *pCopyPass;
-   BYTE            *pMapped;
-   Uint32           uiOffset;
-   int              y;
+   SDL_Rect  whole;
+   SDL_Point origin = { 0, 0 };
 
    if (!pEntry->fGPUStale)
    {
@@ -429,16 +527,10 @@ VIDEO_GPU_EnsureOnGPU(
 
    VIDEO_GPU_FlushBatch();
 
-   pMapped = VIDEO_GPU_RingMap(pSurface->w * pSurface->h, &uiOffset);
-   for (y = 0; y < pSurface->h; y++)
-   {
-      memcpy(pMapped + y * pSurface->w, (const BYTE *)pSurface->pixels + y * pSurface->pitch, pSurface->w);
-   }
-   SDL_UnmapGPUTransferBuffer(gGPU.pDevice, gGPU.pRing);
-
-   pCopyPass = SDL_BeginGPUCopyPass(VIDEO_GPU_Commands());
-   VIDEO_GPU_UploadRegion(pCopyPass, gGPU.pRing, uiOffset, pEntry->pTexture, 0, 0, pSurface->w, pSurface->h);
-   SDL_EndGPUCopyPass(pCopyPass);
+   whole.x = whole.y = 0;
+   whole.w = pEntry->pSurface->w;
+   whole.h = pEntry->pSurface->h;
+   VIDEO_GPU_UploadPixels(pEntry->pSurface, &whole, pEntry->pTexture, &origin);
 
    pEntry->fGPUStale = FALSE;
 }
@@ -448,28 +540,68 @@ VIDEO_GPU_MarkDrawn(
    GPUSURFACE *pEntry
 )
 {
-   //
-   // When verifying the CPU draws the same thing, so its pixels stay current.
-   //
-   pEntry->fCPUStale = !gGPU.fVerify;
+   pEntry->fCPUStale = TRUE;
 }
 
 static VOID
-VIDEO_GPU_CopyToScratch(
-   GPUSURFACE *pEntry
+VIDEO_GPU_CopyRegion(
+   SDL_GPUTexture  *pSrc,
+   const SDL_Rect  *pSrcRect,
+   SDL_GPUTexture  *pDst,
+   const SDL_Point *pDstPos
 )
 {
    SDL_GPUTextureLocation source, destination;
    SDL_GPUCopyPass       *pCopyPass;
 
    SDL_zero(source);
-   source.texture = pEntry->pTexture;
+   source.texture = pSrc;
+   source.x = pSrcRect->x;
+   source.y = pSrcRect->y;
+
    SDL_zero(destination);
-   destination.texture = gGPU.pScratch;
+   destination.texture = pDst;
+   destination.x = pDstPos->x;
+   destination.y = pDstPos->y;
 
    pCopyPass = SDL_BeginGPUCopyPass(VIDEO_GPU_Commands());
-   SDL_CopyGPUTextureToTexture(pCopyPass, &source, &destination, SCREEN_WIDTH, SCREEN_HEIGHT, 1, false);
+   SDL_CopyGPUTextureToTexture(pCopyPass, &source, &destination, pSrcRect->w, pSrcRect->h, 1, false);
    SDL_EndGPUCopyPass(pCopyPass);
+}
+
+static VOID
+VIDEO_GPU_CopyToScratch(
+   GPUSURFACE     *pEntry,
+   const SDL_Rect *pArea
+)
+/*++
+  Purpose:
+
+    Copy a screen-sized surface to the scratch texture, keeping everything in place.
+
+  Parameters:
+
+    [IN]  pEntry - the surface.
+
+    [IN]  pArea - the area to copy, NULL for the whole surface.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   SDL_Rect  area;
+   SDL_Point position;
+
+   area.x = pArea ? pArea->x : 0;
+   area.y = pArea ? pArea->y : 0;
+   area.w = pArea ? pArea->w : SCREEN_WIDTH;
+   area.h = pArea ? pArea->h : SCREEN_HEIGHT;
+   position.x = area.x;
+   position.y = area.y;
+
+   VIDEO_GPU_CopyRegion(pEntry->pTexture, &area, gGPU.pScratch, &position);
 }
 
 static BOOL
@@ -515,8 +647,8 @@ VIDEO_GPU_RegisterSurface(
 /*++
   Purpose:
 
-    Create the texture of an 8-bit surface. Surfaces that do not fit stay on the CPU,
-    which is slower but still correct.
+    Create the texture of an 8-bit surface. Surfaces that do not fit, or whose texture
+    cannot be created, stay on the CPU, which is slower but still correct.
 
   Parameters:
 
@@ -528,31 +660,22 @@ VIDEO_GPU_RegisterSurface(
 
 --*/
 {
-   SDL_GPUTextureCreateInfo info;
-   GPUSURFACE              *pEntry;
+   GPUSURFACE *pEntry;
 
    if (gGPU.pDevice == NULL || pSurface == NULL || SDL_BITSPERPIXEL(pSurface->format) != 8)
    {
       return;
    }
 
-   pEntry = VIDEO_GPU_FindSurface(NULL);
+   pEntry = VIDEO_GPU_FindFreeSlot();
    if (pEntry == NULL)
    {
       UTIL_LogOutput(LOGLEVEL_WARNING, "Too many surfaces for the GPU; drawing this one on the CPU\n");
       return;
    }
 
-   SDL_zero(info);
-   info.type = SDL_GPU_TEXTURETYPE_2D;
-   info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
-   info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-   info.width = pSurface->w;
-   info.height = pSurface->h;
-   info.layer_count_or_depth = 1;
-   info.num_levels = 1;
-
-   pEntry->pTexture = SDL_CreateGPUTexture(gGPU.pDevice, &info);
+   pEntry->pTexture = VIDEO_GPU_CreateTexture(SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, pSurface->w, pSurface->h);
    if (pEntry->pTexture == NULL)
    {
       UTIL_LogOutput(LOGLEVEL_WARNING, "Surface texture could not be created: %s\n", SDL_GetError());
@@ -591,6 +714,86 @@ VIDEO_GPU_IsTarget(
    return VIDEO_GPU_FindSurface(pSurface) != NULL;
 }
 
+static VOID
+VIDEO_GPU_WaitForForeground(
+   VOID
+)
+/*++
+  Purpose:
+
+    Wait until the app is back in the foreground, for work on the GPU that the caller
+    cannot go on without. Using the GPU from the background gets an iOS app terminated,
+    and the system suspends the app in here before long anyway.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   while (g_bAppInBackground)
+   {
+      SDL_PumpEvents();
+      SDL_Delay(50);
+   }
+}
+
+static VOID
+VIDEO_GPU_CheckDownload(
+   SDL_Surface    *pSurface,
+   const BYTE     *pMapped
+)
+/*++
+  Purpose:
+
+    Verification: compare a surface downloaded from the GPU with its pixels, which hold
+    the software result because the CPU drew everything as well.
+
+  Parameters:
+
+    [IN]  pSurface - the surface.
+
+    [IN]  pMapped - what the GPU has for it.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   DWORD dwBad = 0;
+   int   x, y, iFirstX = -1, iFirstY = -1;
+
+   for (y = 0; y < pSurface->h; y++)
+   {
+      const BYTE *pRow = (const BYTE *)pSurface->pixels + y * pSurface->pitch;
+
+      for (x = 0; x < pSurface->w; x++)
+      {
+         if (pRow[x] != pMapped[y * pSurface->w + x])
+         {
+            if (dwBad++ == 0)
+            {
+               iFirstX = x;
+               iFirstY = y;
+            }
+         }
+      }
+   }
+
+   gGPU.dwDownloads++;
+   if (dwBad > 0 && ++gGPU.dwDownloadMismatches <= 40)
+   {
+      UTIL_LogOutput(LOGLEVEL_WARNING, "[GPUVERIFY] download %u: %u wrong pixels; first at (%d,%d): gpu index %d, cpu index %d\n",
+         gGPU.dwDownloads, dwBad, iFirstX, iFirstY, pMapped[iFirstY * pSurface->w + iFirstX],
+         ((const BYTE *)pSurface->pixels)[iFirstY * pSurface->pitch + iFirstX]);
+   }
+}
+
 VOID
 VIDEO_GPU_PrepareCPUAccess(
    SDL_Surface    *pSurface
@@ -624,6 +827,8 @@ VIDEO_GPU_PrepareCPUAccess(
       return;
    }
 
+   VIDEO_GPU_WaitForForeground();
+
    VIDEO_GPU_FlushBatch();
 
    SDL_zero(source);
@@ -647,9 +852,16 @@ VIDEO_GPU_PrepareCPUAccess(
    SDL_ReleaseGPUFence(gGPU.pDevice, pFence);
 
    pMapped = (const BYTE *)SDL_MapGPUTransferBuffer(gGPU.pDevice, gGPU.pDownload, false);
-   for (y = 0; y < pSurface->h; y++)
+   if (gGPU.fVerify)
    {
-      memcpy((BYTE *)pSurface->pixels + y * pSurface->pitch, pMapped + y * pSurface->w, pSurface->w);
+      VIDEO_GPU_CheckDownload(pSurface, pMapped);
+   }
+   else
+   {
+      for (y = 0; y < pSurface->h; y++)
+      {
+         memcpy((BYTE *)pSurface->pixels + y * pSurface->pitch, pMapped + y * pSurface->w, pSurface->w);
+      }
    }
    SDL_UnmapGPUTransferBuffer(gGPU.pDevice, gGPU.pDownload);
 
@@ -776,7 +988,7 @@ VIDEO_GPU_AtlasAdd(
 
     [IN]  hash - identifies the image.
 
-    [IN]  w - width of the image, at most ATLAS_SIZE.
+    [IN]  w - width of the image, at most ATLAS_SIZE. All its pixels must fit in STAGE_BYTES.
 
     [IN]  h - height of the image, at most ATLAS_SIZE.
 
@@ -840,9 +1052,50 @@ VIDEO_GPU_AtlasAdd(
    return pPixels;
 }
 
+static const BYTE *
+VIDEO_GPU_ReadRLEHeader(
+   LPCBITMAPRLE lpBitmapRLE,
+   UINT        *puiWidth,
+   UINT        *puiHeight
+)
+/*++
+  Purpose:
+
+    Read the size of an RLE bitmap.
+
+  Parameters:
+
+    [IN]  lpBitmapRLE - the bitmap.
+
+    [OUT] puiWidth - its width.
+
+    [OUT] puiHeight - its height.
+
+  Return value:
+
+    Where its pixel data starts.
+
+--*/
+{
+   const BYTE *p = lpBitmapRLE;
+
+   if (p[0] == 0x02 && p[1] == 0x00 && p[2] == 0x00 && p[3] == 0x00)
+   {
+      p += 4;
+   }
+
+   *puiWidth = p[0] | (p[1] << 8);
+   *puiHeight = p[2] | (p[3] << 8);
+
+   return p + 4;
+}
+
 static const ATLASENTRY *
 VIDEO_GPU_CacheRLE(
-   LPCBITMAPRLE lpBitmapRLE
+   LPCBITMAPRLE lpBitmapRLE,
+   const BYTE  *pData,
+   UINT         uiWidth,
+   UINT         uiHeight
 )
 /*++
   Purpose:
@@ -854,35 +1107,30 @@ VIDEO_GPU_CacheRLE(
 
     [IN]  lpBitmapRLE - the bitmap.
 
+    [IN]  pData - where its pixel data starts.
+
+    [IN]  uiWidth - its width, not zero.
+
+    [IN]  uiHeight - its height, not zero.
+
   Return value:
 
-    The atlas entry. NULL if the bitmap has no pixels or cannot fit.
+    The atlas entry. NULL if the bitmap cannot fit.
 
 --*/
 {
-   const BYTE *p = lpBitmapRLE;
-   const BYTE *pData, *pEnd;
+   const BYTE *p;
+   const BYTE *pEnd;
    ATLASENTRY *pEntry;
    BYTE       *pPixels;
    Uint64      hash = FNV_OFFSET;
-   UINT        uiWidth, uiHeight, uiLen, i;
+   UINT        uiLen = uiWidth * uiHeight, i;
    BYTE        T;
 
-   if (p[0] == 0x02 && p[1] == 0x00 && p[2] == 0x00 && p[3] == 0x00)
-   {
-      p += 4;
-   }
-
-   uiWidth = p[0] | (p[1] << 8);
-   uiHeight = p[2] | (p[3] << 8);
-   uiLen = uiWidth * uiHeight;
-
-   if (uiLen == 0 || uiWidth > ATLAS_SIZE || uiHeight > ATLAS_SIZE)
+   if (uiWidth > ATLAS_SIZE || uiHeight > ATLAS_SIZE || uiLen * 2 > STAGE_BYTES)
    {
       return NULL;
    }
-
-   pData = p + 4;
 
    //
    // Walk the stream once to find its end, hashing as we go.
@@ -980,10 +1228,24 @@ VIDEO_GPU_DrawRLE(
 {
    GPUSURFACE       *pTarget = VIDEO_GPU_FindSurface(pDst);
    const ATLASENTRY *pEntry;
+   const BYTE       *pData;
+   UINT              uiWidth, uiHeight;
+   int               x = PAL_X(pos), y = PAL_Y(pos);
 
    if (pTarget == NULL)
    {
       return FALSE;
+   }
+
+   //
+   // Nothing to draw. Like the software routines, this does not read the pixel data of a
+   // bitmap that misses the surface, which also keeps it out of the atlas.
+   //
+   pData = VIDEO_GPU_ReadRLEHeader(lpBitmapRLE, &uiWidth, &uiHeight);
+   if (uiWidth == 0 || uiHeight == 0 || x + (int)uiWidth <= 0 || x >= pDst->w ||
+       y + (int)uiHeight <= 0 || y >= pDst->h)
+   {
+      return !gGPU.fVerify;
    }
 
    if ((iMode == kGPUDrawShadow && !VIDEO_GPU_IsScreenSized(pTarget)) ||
@@ -992,7 +1254,7 @@ VIDEO_GPU_DrawRLE(
       return VIDEO_GPU_FallBackToCPU(pTarget);
    }
 
-   pEntry = VIDEO_GPU_CacheRLE(lpBitmapRLE);
+   pEntry = VIDEO_GPU_CacheRLE(lpBitmapRLE, pData, uiWidth, uiHeight);
    if (pEntry == NULL)
    {
       return VIDEO_GPU_FallBackToCPU(pTarget);
@@ -1003,14 +1265,21 @@ VIDEO_GPU_DrawRLE(
    if (iMode == kGPUDrawShadow)
    {
       //
-      // A shadow darkens what is already there, so it reads a copy of the surface and
-      // has to see everything drawn before it.
+      // A shadow darkens what is already there, so it reads a copy of the area it covers
+      // and has to see everything drawn before it.
       //
+      SDL_Rect area;
+
+      area.x = SDL_max(x, 0);
+      area.y = SDL_max(y, 0);
+      area.w = SDL_min(x + pEntry->w, pDst->w) - area.x;
+      area.h = SDL_min(y + pEntry->h, pDst->h) - area.y;
+
       VIDEO_GPU_FlushBatch();
-      VIDEO_GPU_CopyToScratch(pTarget);
+      VIDEO_GPU_CopyToScratch(pTarget, &area);
    }
 
-   VIDEO_GPU_AddInstance(pTarget, PAL_X(pos), PAL_Y(pos), pEntry->w, pEntry->h,
+   VIDEO_GPU_AddInstance(pTarget, x, y, pEntry->w, pEntry->h,
       pEntry->x, pEntry->y, iMode, iColorShift, bColor);
 
    if (iMode == kGPUDrawShadow)
@@ -1199,32 +1468,6 @@ VIDEO_GPU_ClipCopy(
    return w > 0 && h > 0;
 }
 
-static VOID
-VIDEO_GPU_CopyRegion(
-   SDL_GPUTexture  *pSrc,
-   const SDL_Rect  *pSrcRect,
-   SDL_GPUTexture  *pDst,
-   const SDL_Point *pDstPos
-)
-{
-   SDL_GPUTextureLocation source, destination;
-   SDL_GPUCopyPass       *pCopyPass;
-
-   SDL_zero(source);
-   source.texture = pSrc;
-   source.x = pSrcRect->x;
-   source.y = pSrcRect->y;
-
-   SDL_zero(destination);
-   destination.texture = pDst;
-   destination.x = pDstPos->x;
-   destination.y = pDstPos->y;
-
-   pCopyPass = SDL_BeginGPUCopyPass(VIDEO_GPU_Commands());
-   SDL_CopyGPUTextureToTexture(pCopyPass, &source, &destination, pSrcRect->w, pSrcRect->h, 1, false);
-   SDL_EndGPUCopyPass(pCopyPass);
-}
-
 BOOL
 VIDEO_GPU_Blit(
    SDL_Surface    *pSrc,
@@ -1350,7 +1593,7 @@ VIDEO_GPU_ApplyWave(
 
    VIDEO_GPU_EnsureOnGPU(pTarget);
    VIDEO_GPU_FlushBatch();
-   VIDEO_GPU_CopyToScratch(pTarget);
+   VIDEO_GPU_CopyToScratch(pTarget, NULL);
 
    SDL_zero(params);
    params.mode = kEffectWave;
@@ -1388,7 +1631,7 @@ VIDEO_GPU_CrossFadeStep(
    VIDEO_GPU_EnsureOnGPU(pSource);
    VIDEO_GPU_EnsureOnGPU(pTarget);
    VIDEO_GPU_FlushBatch();
-   VIDEO_GPU_CopyToScratch(pTarget);
+   VIDEO_GPU_CopyToScratch(pTarget, NULL);
 
    SDL_zero(params);
    params.mode = kEffectCrossFade;
@@ -1450,7 +1693,7 @@ VIDEO_GPU_ReplaceIndex(
 
    VIDEO_GPU_EnsureOnGPU(pTarget);
    VIDEO_GPU_FlushBatch();
-   VIDEO_GPU_CopyToScratch(pTarget);
+   VIDEO_GPU_CopyToScratch(pTarget, NULL);
 
    SDL_zero(params);
    params.mode = kEffectReplace;
@@ -1461,7 +1704,7 @@ VIDEO_GPU_ReplaceIndex(
    return !gGPU.fVerify;
 }
 
-VOID
+BOOL
 VIDEO_GPU_OnSetPalette(
    const SDL_Color *rgPalette
 )
@@ -1476,22 +1719,26 @@ VIDEO_GPU_OnSetPalette(
 
   Return value:
 
-    None.
+    TRUE to go on and set this palette. FALSE if it is only the software result of the
+    fade step just set up on the GPU, kept to compare the GPU result with when verifying.
+    A normal run leaves the palette of the screen alone during a fade, so this does too.
 
 --*/
 {
+   if (gGPU.fVerify)
+   {
+      memcpy(gGPU.rgExpectedPalette, rgPalette, PALETTE_BYTES);
+   }
+
    if (gGPU.fFadeArmed)
    {
-      //
-      // Verification: this is the software result of the fade step just set up on the
-      // GPU. It stays out of the GPU palette and gets compared with the GPU result.
-      //
       gGPU.fFadeArmed = FALSE;
-      return;
+      return FALSE;
    }
 
    memcpy(gGPU.rgPalette, rgPalette, PALETTE_BYTES);
    SDL_zero(gGPU.fade);
+   return TRUE;
 }
 
 BOOL
@@ -1574,7 +1821,7 @@ VIDEO_GPU_ResolvePalette(
    const FADEPARAMS *f = &gGPU.fade;
    int               i;
 
-   if (f->mode == kPaletteFadeNone || gGPU.fVerify)
+   if (f->mode == kPaletteFadeNone)
    {
       return;
    }
@@ -1630,6 +1877,100 @@ VIDEO_GPU_ResolvePalette(
    }
 }
 
+static int
+VIDEO_GPU_SubtractRect(
+   SDL_Rect       *rgRects,
+   int             nRects,
+   int             nMaxRects,
+   const SDL_Rect *pCut
+)
+/*++
+  Purpose:
+
+    Remove an area from a list of rectangles that do not overlap.
+
+  Parameters:
+
+    [IN/OUT] rgRects - the list.
+
+    [IN]  nRects - how many rectangles it holds.
+
+    [IN]  nMaxRects - how many rectangles it has room for. A rectangle that would need
+          more stays whole.
+
+    [IN]  pCut - the area to remove.
+
+  Return value:
+
+    How many rectangles it holds now.
+
+--*/
+{
+   int i;
+
+   for (i = nRects - 1; i >= 0; i--)
+   {
+      const SDL_Rect r = rgRects[i];
+      SDL_Rect       rgParts[4];
+      SDL_Rect       overlap;
+      int            nParts = 0, iBelow, iRight, iPart;
+
+      if (!SDL_GetRectIntersection(&r, pCut, &overlap))
+      {
+         continue;
+      }
+
+      iBelow = overlap.y + overlap.h;
+      iRight = overlap.x + overlap.w;
+
+      if (overlap.y > r.y)
+      {
+         rgParts[nParts].x = r.x;
+         rgParts[nParts].y = r.y;
+         rgParts[nParts].w = r.w;
+         rgParts[nParts++].h = overlap.y - r.y;
+      }
+      if (iBelow < r.y + r.h)
+      {
+         rgParts[nParts].x = r.x;
+         rgParts[nParts].y = iBelow;
+         rgParts[nParts].w = r.w;
+         rgParts[nParts++].h = r.y + r.h - iBelow;
+      }
+      if (overlap.x > r.x)
+      {
+         rgParts[nParts].x = r.x;
+         rgParts[nParts].y = overlap.y;
+         rgParts[nParts].w = overlap.x - r.x;
+         rgParts[nParts++].h = overlap.h;
+      }
+      if (iRight < r.x + r.w)
+      {
+         rgParts[nParts].x = iRight;
+         rgParts[nParts].y = overlap.y;
+         rgParts[nParts].w = r.x + r.w - iRight;
+         rgParts[nParts++].h = overlap.h;
+      }
+
+      if (nRects - 1 + nParts > nMaxRects)
+      {
+         continue;
+      }
+
+      //
+      // Whatever moves into this place is either done with or a new part, so neither
+      // needs another look.
+      //
+      rgRects[i] = rgRects[--nRects];
+      for (iPart = 0; iPart < nParts; iPart++)
+      {
+         rgRects[nRects++] = rgParts[iPart];
+      }
+   }
+
+   return nRects;
+}
+
 VOID
 VIDEO_GPU_WriteScreen(
    SDL_Surface    *pSource,
@@ -1658,7 +1999,7 @@ VIDEO_GPU_WriteScreen(
 --*/
 {
    GPUSURFACE *pEntry = VIDEO_GPU_FindSurface(pSource);
-   SDL_Rect    area;
+   SDL_Rect    area, written;
    SDL_Point   position;
 
    if (!VIDEO_GPU_ClipCopy(pSource->w, pSource->h, pSourceRect, SCREEN_WIDTH, SCREEN_HEIGHT, pDestRect, &area, &position))
@@ -1673,6 +2014,13 @@ VIDEO_GPU_WriteScreen(
       VIDEO_GPU_EnsureOnGPU(pEntry);
       VIDEO_GPU_CopyRegion(pEntry->pTexture, &area, gGPU.pIndexTexture, &position);
    }
+   else
+   {
+      //
+      // It stayed on the CPU, so its pixels are current.
+      //
+      VIDEO_GPU_UploadPixels(pSource, &area, gGPU.pIndexTexture, &position);
+   }
 
    if (gGPU.fVerify)
    {
@@ -1682,19 +2030,18 @@ VIDEO_GPU_WriteScreen(
       {
          memcpy(gGPU.pExpectedIndex + (position.y + y) * SCREEN_WIDTH + position.x,
             (const BYTE *)pSource->pixels + (area.y + y) * pSource->pitch + area.x, area.w);
+         memset(gGPU.pExpectedBlack + (position.y + y) * SCREEN_WIDTH + position.x, 0, area.w);
       }
    }
 
    //
-   // New pixels replace the black band they completely cover. A partial overlap
-   // leaves the band in place until the next full update, which comes right after
-   // the shake that created it.
+   // New pixels replace whatever part of the black band they cover.
    //
-   if (position.x == 0 && area.w == SCREEN_WIDTH && position.y <= gGPU.blackBand.y &&
-       position.y + area.h >= gGPU.blackBand.y + gGPU.blackBand.h)
-   {
-      SDL_zero(gGPU.blackBand);
-   }
+   written.x = position.x;
+   written.y = position.y;
+   written.w = area.w;
+   written.h = area.h;
+   gGPU.nBlackBand = VIDEO_GPU_SubtractRect(gGPU.rgBlackBand, gGPU.nBlackBand, MAX_BAND_RECTS, &written);
 }
 
 VOID
@@ -1704,7 +2051,7 @@ VIDEO_GPU_SetBlackBand(
 /*++
   Purpose:
 
-    Set the band at the top or bottom of the screen which a shake leaves uncovered.
+    Blacken the band at the top or bottom of the screen which a shake leaves uncovered.
     It has to be true black, while palette entry 0 is not black in every palette.
 
   Parameters:
@@ -1717,7 +2064,29 @@ VIDEO_GPU_SetBlackBand(
 
 --*/
 {
-   gGPU.blackBand = *pRect;
+   static const SDL_Rect screen = { 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT };
+   SDL_Rect              band;
+
+   if (!SDL_GetRectIntersection(pRect, &screen, &band))
+   {
+      return;
+   }
+
+   gGPU.nBlackBand = VIDEO_GPU_SubtractRect(gGPU.rgBlackBand, gGPU.nBlackBand, MAX_BAND_RECTS, &band);
+   if (gGPU.nBlackBand < MAX_BAND_RECTS)
+   {
+      gGPU.rgBlackBand[gGPU.nBlackBand++] = band;
+   }
+
+   if (gGPU.fVerify)
+   {
+      int y;
+
+      for (y = 0; y < band.h; y++)
+      {
+         memset(gGPU.pExpectedBlack + (band.y + y) * SCREEN_WIDTH + band.x, 1, band.w);
+      }
+   }
 }
 
 SDL_Rect
@@ -1917,27 +2286,28 @@ VIDEO_GPU_Display(
 
          if (gGPU.uiFilterWidth != uiWidth2 || gGPU.uiFilterHeight != uiHeight2)
          {
-            SDL_GPUTextureCreateInfo info;
-
             SDL_ReleaseGPUTexture(gGPU.pDevice, gGPU.pFilterTexture);
 
-            SDL_zero(info);
-            info.type = SDL_GPU_TEXTURETYPE_2D;
-            info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-            info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-            info.width = uiWidth2;
-            info.height = uiHeight2;
-            info.layer_count_or_depth = 1;
-            info.num_levels = 1;
-
-            gGPU.pFilterTexture = SDL_CreateGPUTexture(gGPU.pDevice, &info);
+            gGPU.pFilterTexture = VIDEO_GPU_CreateTexture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+               SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, uiWidth2, uiHeight2);
             gGPU.uiFilterWidth = uiWidth2;
             gGPU.uiFilterHeight = uiHeight2;
+            if (gGPU.pFilterTexture == NULL)
+            {
+               gGPU.uiFilterWidth = gGPU.uiFilterHeight = 0;
+               UTIL_LogOutput(LOGLEVEL_ERROR, "Filter texture could not be created: %s\n", SDL_GetError());
+            }
          }
 
-         VIDEO_GPU_DrawFullscreen(pCommands, gGPU.pFilterTexture, NULL, TRUE, gGPU.pFilterPrePipeline,
-            pImage, pSampler);
-         pImage = gGPU.pFilterTexture;
+         //
+         // Without the texture the first pass is left out, and the next frame tries again.
+         //
+         if (gGPU.pFilterTexture != NULL)
+         {
+            VIDEO_GPU_DrawFullscreen(pCommands, gGPU.pFilterTexture, NULL, TRUE, gGPU.pFilterPrePipeline,
+               pImage, pSampler);
+            pImage = gGPU.pFilterTexture;
+         }
       }
 
       VIDEO_GPU_DrawFullscreen(pCommands, pSwapchain, &viewport, TRUE, gGPU.pFilterPipeline, pImage, pSampler);
@@ -2006,9 +2376,23 @@ VIDEO_GPU_VerifyFrame(
    SDL_GPUCopyPass           *pCopyPass;
    SDL_GPUFence              *pFence;
    const BYTE                *pMapped;
-   const SDL_Color           *rgPalette = VIDEO_GetPalette();
-   DWORD                      dwBadIndex = 0, dwBadColor = 0;
+   const SDL_Color           *rgPalette = gGPU.rgExpectedPalette;
+   SDL_Color                  rgResolved[PALETTE_ENTRIES];
+   DWORD                      dwBadIndex = 0, dwBadColor = 0, dwBadPalette = 0;
    int                        i, iFirstBad = -1;
+
+   //
+   // What CPU code gets if it asks for the palette at this point.
+   //
+   memcpy(rgResolved, rgPalette, PALETTE_BYTES);
+   VIDEO_GPU_ResolvePalette(rgResolved);
+   for (i = 0; i < PALETTE_ENTRIES; i++)
+   {
+      if (rgResolved[i].r != rgPalette[i].r || rgResolved[i].g != rgPalette[i].g || rgResolved[i].b != rgPalette[i].b)
+      {
+         dwBadPalette++;
+      }
+   }
 
    SDL_zero(source);
    source.w = SCREEN_WIDTH;
@@ -2037,14 +2421,9 @@ VIDEO_GPU_VerifyFrame(
 
    for (i = 0; i < SCREEN_PIXELS; i++)
    {
-      const BYTE      *pRGB = pMapped + SCREEN_PIXELS + i * 4;
-      const SDL_Color *pWanted = &rgPalette[gGPU.pExpectedIndex[i]];
-      int              y = i / SCREEN_WIDTH;
-
-      //
-      // The band left by a shake holds no palette color.
-      //
-      BOOL fBand = (gGPU.blackBand.h > 0 && y >= gGPU.blackBand.y && y < gGPU.blackBand.y + gGPU.blackBand.h);
+      static const SDL_Color black = { 0, 0, 0, 255 };
+      const BYTE            *pRGB = pMapped + SCREEN_PIXELS + i * 4;
+      const SDL_Color       *pWanted = gGPU.pExpectedBlack[i] ? &black : &rgPalette[gGPU.pExpectedIndex[i]];
 
       if (pMapped[i] != gGPU.pExpectedIndex[i])
       {
@@ -2055,7 +2434,7 @@ VIDEO_GPU_VerifyFrame(
          }
       }
 
-      if (!fBand && (pRGB[0] != pWanted->r || pRGB[1] != pWanted->g || pRGB[2] != pWanted->b))
+      if (pRGB[0] != pWanted->r || pRGB[1] != pWanted->g || pRGB[2] != pWanted->b)
       {
          dwBadColor++;
          if (iFirstBad < 0)
@@ -2073,6 +2452,11 @@ VIDEO_GPU_VerifyFrame(
    if (dwBadColor > 0)
    {
       gGPU.dwColorMismatches++;
+   }
+   if (dwBadPalette > 0 && ++gGPU.dwPaletteMismatches <= 40)
+   {
+      UTIL_LogOutput(LOGLEVEL_WARNING, "[GPUVERIFY] frame %u: %u palette entries worked out wrong; fade mode %d step %d\n",
+         gGPU.dwFrames, dwBadPalette, gGPU.fade.mode, gGPU.fade.step);
    }
 
    if ((dwBadIndex > 0 || dwBadColor > 0) && gGPU.dwIndexMismatches + gGPU.dwColorMismatches <= 40)
@@ -2169,14 +2553,15 @@ VIDEO_GPU_Present(
    SDL_GPUTextureSamplerBinding  bindings[3];
    BYTE                         *pUpload;
    Uint32                        uiOffset;
-   int                           iVisible = SCREEN_HEIGHT - gGPU.blackBand.h;
+   SDL_Rect                      rgShown[MAX_SHOWN_RECTS];
+   int                           nShown = 1, i;
 
    //
    // VIDEO_SwitchScreen() and VIDEO_FadeScreen() draw without checking this themselves,
    // and using the GPU from the background gets an iOS app terminated. What was recorded
    // so far gets submitted with the next frame.
    //
-   if (g_bRenderPaused)
+   if (g_bRenderPaused || g_bAppInBackground)
    {
       return;
    }
@@ -2210,22 +2595,24 @@ VIDEO_GPU_Present(
 
    SDL_PushGPUFragmentUniformData(pCommands, 0, &gGPU.fade, sizeof(gGPU.fade));
 
-   pPass = SDL_BeginGPURenderPass(pCommands, &target, 1, NULL);
-   if (iVisible > 0)
+   //
+   // The black band simply keeps the color the target was cleared to.
+   //
+   rgShown[0].x = 0;
+   rgShown[0].y = 0;
+   rgShown[0].w = SCREEN_WIDTH;
+   rgShown[0].h = SCREEN_HEIGHT;
+   for (i = 0; i < gGPU.nBlackBand; i++)
    {
-      //
-      // The black band simply keeps the color the target was cleared to.
-      //
-      SDL_Rect visible;
+      nShown = VIDEO_GPU_SubtractRect(rgShown, nShown, MAX_SHOWN_RECTS, &gGPU.rgBlackBand[i]);
+   }
 
-      visible.x = 0;
-      visible.y = (gGPU.blackBand.y == 0) ? gGPU.blackBand.h : 0;
-      visible.w = SCREEN_WIDTH;
-      visible.h = iVisible;
-
-      SDL_BindGPUGraphicsPipeline(pPass, gGPU.pPalettePipeline);
-      SDL_SetGPUScissor(pPass, &visible);
-      SDL_BindGPUFragmentSamplers(pPass, 0, bindings, 3);
+   pPass = SDL_BeginGPURenderPass(pCommands, &target, 1, NULL);
+   SDL_BindGPUGraphicsPipeline(pPass, gGPU.pPalettePipeline);
+   SDL_BindGPUFragmentSamplers(pPass, 0, bindings, 3);
+   for (i = 0; i < nShown; i++)
+   {
+      SDL_SetGPUScissor(pPass, &rgShown[i]);
       SDL_DrawGPUPrimitives(pPass, 3, 1, 0, 0);
    }
    SDL_EndGPURenderPass(pPass);
@@ -2258,7 +2645,7 @@ VIDEO_GPU_PresentSurface(
    Uint32                 uiOffset = 0;
    Uint32                 uiBytes = pSurface->w * pSurface->h * 4;
 
-   if (g_bRenderPaused)
+   if (g_bRenderPaused || g_bAppInBackground)
    {
       return;
    }
@@ -2267,20 +2654,10 @@ VIDEO_GPU_PresentSurface(
 
    if (gGPU.uiRGBWidth != (Uint32)pSurface->w || gGPU.uiRGBHeight != (Uint32)pSurface->h)
    {
-      SDL_GPUTextureCreateInfo info;
-
       SDL_ReleaseGPUTexture(gGPU.pDevice, gGPU.pRGBTexture);
 
-      SDL_zero(info);
-      info.type = SDL_GPU_TEXTURETYPE_2D;
-      info.format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
-      info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-      info.width = pSurface->w;
-      info.height = pSurface->h;
-      info.layer_count_or_depth = 1;
-      info.num_levels = 1;
-
-      gGPU.pRGBTexture = SDL_CreateGPUTexture(gGPU.pDevice, &info);
+      gGPU.pRGBTexture = VIDEO_GPU_CreateTexture(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,
+         SDL_GPU_TEXTUREUSAGE_SAMPLER, pSurface->w, pSurface->h);
       gGPU.uiRGBWidth = pSurface->w;
       gGPU.uiRGBHeight = pSurface->h;
       if (gGPU.pRGBTexture == NULL)
@@ -2494,29 +2871,6 @@ VIDEO_GPU_CreateSpritePipeline(
    return pPipeline;
 }
 
-static SDL_GPUTexture *
-VIDEO_GPU_CreateTexture(
-   SDL_GPUTextureFormat     format,
-   SDL_GPUTextureUsageFlags usage,
-   Uint32                   uiWidth,
-   Uint32                   uiHeight
-)
-{
-   SDL_GPUTextureCreateInfo info;
-
-   SDL_zero(info);
-   info.type = SDL_GPU_TEXTURETYPE_2D;
-   info.format = format;
-   info.usage = usage;
-   info.width = uiWidth;
-   info.height = uiHeight;
-   info.layer_count_or_depth = 1;
-   info.num_levels = 1;
-   info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-
-   return SDL_CreateGPUTexture(gGPU.pDevice, &info);
-}
-
 static SDL_GPUSampler *
 VIDEO_GPU_CreateSampler(
    SDL_GPUFilter filter
@@ -2636,13 +2990,15 @@ VIDEO_GPU_Init(
    gGPU.pUploads = (ATLASUPLOAD *)SDL_malloc(MAX_UPLOADS * sizeof(ATLASUPLOAD));
    gGPU.pAtlasEntries = (ATLASENTRY *)SDL_calloc(ATLAS_SLOTS, sizeof(ATLASENTRY));
    gGPU.pExpectedIndex = (BYTE *)SDL_calloc(SCREEN_PIXELS, 1);
+   gGPU.pExpectedBlack = (BYTE *)SDL_calloc(SCREEN_PIXELS, 1);
 
    if (gGPU.pSpritePipeline == NULL || gGPU.pEffectPipeline == NULL || gGPU.pPalettePipeline == NULL ||
        gGPU.pNearestSampler == NULL || gGPU.pLinearSampler == NULL || gGPU.pAtlas == NULL ||
        gGPU.pScratch == NULL || gGPU.pIndexTexture == NULL || gGPU.pPaletteTexture == NULL ||
        gGPU.pPaletteToTexture == NULL || gGPU.pScreenTexture == NULL || gGPU.pVertexBuffer == NULL ||
        gGPU.pRing == NULL || gGPU.pDownload == NULL || gGPU.pInstances == NULL || gGPU.pStage == NULL ||
-       gGPU.pUploads == NULL || gGPU.pAtlasEntries == NULL || gGPU.pExpectedIndex == NULL)
+       gGPU.pUploads == NULL || gGPU.pAtlasEntries == NULL || gGPU.pExpectedIndex == NULL ||
+       gGPU.pExpectedBlack == NULL)
    {
       UTIL_LogOutput(LOGLEVEL_WARNING, "SDL_GPU resources could not be created: %s\n", SDL_GetError());
       VIDEO_GPU_Shutdown();
@@ -2775,8 +3131,9 @@ VIDEO_GPU_Shutdown(
 
    if (gGPU.fVerify)
    {
-      UTIL_LogOutput(LOGLEVEL_WARNING, "[GPUVERIFY] done: %u frames, %u with wrong indices, %u with wrong colors\n",
-         gGPU.dwFrames, gGPU.dwIndexMismatches, gGPU.dwColorMismatches);
+      UTIL_LogOutput(LOGLEVEL_WARNING, "[GPUVERIFY] done: %u frames, %u with wrong indices, %u with wrong colors, %u with a wrong palette; %u downloads, %u wrong\n",
+         gGPU.dwFrames, gGPU.dwIndexMismatches, gGPU.dwColorMismatches, gGPU.dwPaletteMismatches,
+         gGPU.dwDownloads, gGPU.dwDownloadMismatches);
    }
 
    if (gGPU.pCommands != NULL)
@@ -2825,6 +3182,7 @@ VIDEO_GPU_Shutdown(
    SDL_free(gGPU.pUploads);
    SDL_free(gGPU.pAtlasEntries);
    SDL_free(gGPU.pExpectedIndex);
+   SDL_free(gGPU.pExpectedBlack);
 
    SDL_zero(gGPU);
 }

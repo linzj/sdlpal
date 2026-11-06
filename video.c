@@ -53,6 +53,9 @@ SDL_Surface       *gpScreenReal       = NULL;
 
 volatile BOOL g_bRenderPaused = FALSE;
 
+// Menus also set g_bRenderPaused while they draw, so that alone does not mean this.
+volatile BOOL g_bAppInBackground = FALSE;
+
 static BOOL bScaleScreen = PAL_SCALE_SCREEN;
 
 // Shake times and level
@@ -781,10 +784,16 @@ VIDEO_SetPalette(
 #if SDL_VERSION_ATLEAST(2,0,0)
    SDL_Rect rect;
 
+   rect.x = 0;
+   rect.y = 0;
+   rect.w = 320;
+   rect.h = 200;
+
 #if PAL_HAS_SDL_GPU
-   if (gfUseGPU)
+   if (gfUseGPU && !VIDEO_GPU_OnSetPalette(rgPalette))
    {
-      VIDEO_GPU_OnSetPalette(rgPalette);
+      VIDEO_UpdateScreen(&rect);
+      return;
    }
 #endif
 
@@ -801,11 +810,6 @@ VIDEO_SetPalette(
    SDL_SetSurfaceColorMod(gpScreen, 0xFF, 0xFF, 0xFF);
    SDL_SetSurfaceColorMod(gpScreenBak, 0, 0, 0);
    SDL_SetSurfaceColorMod(gpScreenBak, 0xFF, 0xFF, 0xFF);
-
-   rect.x = 0;
-   rect.y = 0;
-   rect.w = 320;
-   rect.h = 200;
 
    VIDEO_UpdateScreen(&rect);
 #else
@@ -1093,6 +1097,15 @@ VIDEO_ToggleScaleScreen(
 
 --*/
 {
+   //
+   // The SDL_GPU backend only shows the game at full height, which is why VIDEO_Startup()
+   // does not use it for an unscaled screen either.
+   //
+   if (gfUseGPU)
+   {
+      return;
+   }
+
    bScaleScreen = !bScaleScreen;
    VIDEO_Resize(PAL_DEFAULT_WINDOW_WIDTH, PAL_DEFAULT_WINDOW_HEIGHT);
    VIDEO_UpdateScreen(NULL);
@@ -1288,6 +1301,10 @@ VIDEO_SaveScreenshot(
 	//
 	VIDEO_GPU_PrepareCPUAccess(gpScreen);
 #if SDL_VERSION_ATLEAST(2,0,0)
+	//
+	// Palette fades on the GPU leave the palette of the surface behind; this catches it up.
+	//
+	VIDEO_GetPalette();
 	SDL_SaveBMP(gpScreen, PAL_CombinePath(0, gConfig.pszSavePath, filename));
 #else
 	SDL_SaveBMP(gpScreenReal, PAL_CombinePath(0, gConfig.pszSavePath, filename));

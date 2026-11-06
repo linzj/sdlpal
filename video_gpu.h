@@ -177,7 +177,7 @@ VIDEO_GPU_ReplaceIndex(
 //
 // Palette.
 //
-VOID
+BOOL
 VIDEO_GPU_OnSetPalette(
    const SDL_Color *rgPalette
 );
