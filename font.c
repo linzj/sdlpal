@@ -22,6 +22,7 @@
 #include "font.h"
 #include "util.h"
 #include "text.h"
+#include "video_gpu.h"
 
 #define _FONT_C
 
