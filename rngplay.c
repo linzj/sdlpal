@@ -413,6 +413,13 @@ PAL_RNGPlay(
       //
       // Read, decompress and render the frame
       //
+      //
+      // Each frame only changes part of the previous one, so its decoder works on the
+      // pixels of the screen on the CPU.
+      //
+      VIDEO_GPU_PrepareCPUAccess(gpScreen);
+      VIDEO_GPU_FinishCPUWrite(gpScreen);
+
       if (PAL_RNGReadFrame(buf, 65000, iNumRNG, iStartFrame, fp) < 0 ||
           PAL_RNGBlitToSurface(rng, Decompress(buf, rng, 65000), gpScreen) == -1)
       {

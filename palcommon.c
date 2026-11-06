@@ -20,6 +20,7 @@
 //
 
 #include "palcommon.h"
+#include "video_gpu.h"
 #include "global.h"
 #include "palcfg.h"
 
@@ -88,6 +89,11 @@ PAL_RLEBlitToSurfaceWithShadow(
    if (lpBitmapRLE == NULL || lpDstSurface == NULL)
    {
       return -1;
+   }
+
+   if (VIDEO_GPU_DrawRLE(lpBitmapRLE, lpDstSurface, pos, bShadow ? kGPUDrawShadow : kGPUDrawNormal, 0, 0))
+   {
+      return 0;
    }
 
    //
@@ -287,6 +293,11 @@ PAL_RLEBlitWithColorShift(
    if (lpBitmapRLE == NULL || lpDstSurface == NULL)
    {
       return -1;
+   }
+
+   if (VIDEO_GPU_DrawRLE(lpBitmapRLE, lpDstSurface, pos, kGPUDrawColorShift, iColorShift, 0))
+   {
+      return 0;
    }
 
    //
@@ -493,6 +504,11 @@ PAL_RLEBlitMonoColor(
       return -1;
    }
 
+   if (VIDEO_GPU_DrawRLE(lpBitmapRLE, lpDstSurface, pos, kGPUDrawMonoColor, iColorShift, bColor))
+   {
+      return 0;
+   }
+
    //
    // Skip the 0x00000002 in the file header.
    //
@@ -682,6 +698,7 @@ PAL_FBPBlitToSurface(
    //
    // simply copy everything to the surface
    //
+   VIDEO_GPU_PrepareCPUOverwrite(lpDstSurface);
    for (y = 0; y < 200; y++)
    {
       p = (LPBYTE)(lpDstSurface->pixels) + y * lpDstSurface->pitch;
@@ -690,6 +707,7 @@ PAL_FBPBlitToSurface(
          *(p++) = *(lpBitmapFBP++);
       }
    }
+   VIDEO_GPU_FinishCPUWrite(lpDstSurface);
 
    return 0;
 }
