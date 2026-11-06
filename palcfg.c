@@ -575,6 +575,7 @@ PAL_LoadConfig(
 	if (!gConfig.pszSavePath) gConfig.pszSavePath = gConfig.pszGamePath ? strdup(gConfig.pszGamePath) : strdup(PAL_SAVE_PREFIX);
 	if (!gConfig.pszGamePath) gConfig.pszGamePath = strdup(PAL_PREFIX);
     if (!gConfig.pszShaderPath) gConfig.pszShaderPath = strdup(gConfig.pszGamePath);
+	if (!gConfig.pszScaleQuality) gConfig.pszScaleQuality = strdup(DEFAULT_SCALEQUALITY);
 	gConfig.eMusicType = eMusicType;
 	gConfig.eMIDISynth = eMIDISynthType;
 	gConfig.eCDType = eCDType;

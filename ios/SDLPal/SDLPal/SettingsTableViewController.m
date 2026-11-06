@@ -420,7 +420,7 @@ typedef void(^SelectedBlock)(NSString *selected);
     toggleKeepAspect.on         = gConfig.fKeepAspectRatio;
     textTextureWidth.text       = [NSString stringWithFormat:@"%d",gConfig.dwTextureWidth];
     textTextureHeight.text       = [NSString stringWithFormat:@"%d",gConfig.dwTextureHeight];
-    toggleSmoothScaling.on      = gConfig.pszScaleQuality ? strncmp(gConfig.pszScaleQuality, "0", sizeof(char)) != 0 : NO;
+    toggleSmoothScaling.on      = gConfig.pszScaleQuality ? atoi(gConfig.pszScaleQuality) == 1 : NO;
     
     lblMusicType.text       = MusicFormats[gConfig.eMusicType];
     lblOPLCore.text         = gConfig.eMusicType == MUSIC_RIX ? OPLCores[gConfig.eOPLCore] : MIDISynthesizers[gConfig.eMIDISynth];
@@ -452,7 +452,13 @@ typedef void(^SelectedBlock)(NSString *selected);
     gConfig.dwTextureWidth = [textTextureWidth.text intValue];
     gConfig.dwTextureHeight = [textTextureHeight.text intValue];
     gConfig.fUseTouchOverlay = toggleTouchScreenOverlay.isOn;
-    gConfig.pszScaleQuality  = strdup(toggleSmoothScaling.on ? "1" : "0");
+
+    // The toggle only says whether to use bilinear scaling, so any other setting stays
+    // unless the toggle was changed.
+    BOOL wasSmooth = gConfig.pszScaleQuality && atoi(gConfig.pszScaleQuality) == 1;
+    if (toggleSmoothScaling.on != wasSmooth) {
+        gConfig.pszScaleQuality = strdup(toggleSmoothScaling.on ? "1" : PAL_GetConfigString(PALCFG_SCALEQUALITY, YES));
+    }
     
     gConfig.fEnableGLSL = toggleGLSL.isOn;
     gConfig.fEnableHDR = toggleHDR.isOn;
