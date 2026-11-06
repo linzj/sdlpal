@@ -655,6 +655,23 @@ VIDEO_RenderCopy(
 }
 #endif
 
+#if SDL_VERSION_ATLEAST(2,0,0)
+static VOID
+VIDEO_ShowFrame(
+   VOID
+)
+{
+   //
+   // Rendering from the background gets an iOS app terminated. PAL_ProcessEvent() holds
+   // the game there, and coming back redraws the screen, so this frame is not missed.
+   //
+   if (!g_bAppInBackground)
+   {
+      gRenderBackend.RenderCopy();
+   }
+}
+#endif
+
 VOID
 VIDEO_UpdateScreen(
    const SDL_Rect  *lpRect
@@ -773,7 +790,7 @@ VIDEO_UpdateScreen(
    }
 
 #if SDL_VERSION_ATLEAST(2,0,0)
-   gRenderBackend.RenderCopy();
+   VIDEO_ShowFrame();
 #else
    SDL_UpdateRect(gpScreenReal, dstrect.x, dstrect.y, dstrect.w, dstrect.h);
 #endif
@@ -1326,13 +1343,13 @@ VIDEO_SaveScreenshot(
 	{
 		//
 		// The screen is on the GPU, so the file gets a copy of its own. Palette fades on the
-		// GPU leave the palette behind, and VIDEO_GetPalette() catches it up.
+		// GPU leave the palette behind, so this first has to work out where it is now.
 		//
 		SDL_Surface *pCopy = SDL_CreateSurface(320, 200, SDL_PIXELFORMAT_INDEX8);
 
 		if (pCopy != NULL)
 		{
-			VIDEO_GetPalette();
+			VIDEO_GPU_ResolvePalette(gpPalette->colors);
 			VIDEO_UpdateSurfacePalette(pCopy);
 			if (VIDEO_GPU_ReadSurface(gpScreen, (BYTE *)pCopy->pixels, pCopy->pitch))
 			{
@@ -1439,7 +1456,7 @@ VIDEO_SwitchScreen(
 
       VIDEO_BlitToScreenReal(gpScreenBak, NULL, &dstrect);
 #if SDL_VERSION_ATLEAST(2, 0, 0)
-      gRenderBackend.RenderCopy();
+      VIDEO_ShowFrame();
 #else
       SDL_UpdateRect(gpScreenReal, 0, 0, gpScreenReal->w, gpScreenReal->h);
 #endif
@@ -1450,6 +1467,63 @@ VIDEO_SwitchScreen(
 	  }
 
       UTIL_Delay(wSpeed);
+   }
+}
+
+VOID
+VIDEO_CrossFadeStep(
+   SDL_Surface    *lpFrom,
+   SDL_Surface    *lpTo,
+   INT             iPhase,
+   BOOL            fStep
+)
+/*++
+  Purpose:
+
+    Blend every sixth pixel of one 320x200 surface into another.
+
+  Parameters:
+
+    [IN]  lpFrom - the surface to blend from.
+
+    [OUT] lpTo - the surface to blend into.
+
+    [IN]  iPhase - which of the six sets of pixels to blend.
+
+    [IN]  fStep - whether the brightness moves one step closer, or stays as it is.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   int  k;
+   BYTE a, b;
+
+   if (VIDEO_GPU_CrossFadeStep(lpFrom, lpTo, iPhase, fStep))
+   {
+      return;
+   }
+
+   for (k = iPhase; k < lpTo->pitch * lpTo->h; k += 6)
+   {
+      a = ((LPBYTE)(lpFrom->pixels))[k];
+      b = ((LPBYTE)(lpTo->pixels))[k];
+
+      if (fStep)
+      {
+         if ((a & 0x0F) > (b & 0x0F))
+         {
+            b++;
+         }
+         else if ((a & 0x0F) < (b & 0x0F))
+         {
+            b--;
+         }
+      }
+
+      ((LPBYTE)(lpTo->pixels))[k] = ((a & 0xF0) | (b & 0x0F));
    }
 }
 
@@ -1473,9 +1547,8 @@ VIDEO_FadeScreen(
 
 --*/
 {
-   int               i, j, k;
+   int               i, j;
    DWORD             time;
-   BYTE              a, b;
    const int         rgIndex[6] = {0, 3, 1, 5, 2, 4};
    SDL_Rect          dstrect;
    short             offset = 240 - 200;
@@ -1518,28 +1591,7 @@ VIDEO_FadeScreen(
          // Blend the pixels in the 2 buffers, and put the result into the
          // backup buffer
          //
-         if (!VIDEO_GPU_CrossFadeStep(gpScreen, gpScreenBak, rgIndex[j], i > 0))
-         {
-            for (k = rgIndex[j]; k < gpScreen->pitch * gpScreen->h; k += 6)
-            {
-               a = ((LPBYTE)(gpScreen->pixels))[k];
-               b = ((LPBYTE)(gpScreenBak->pixels))[k];
-
-               if (i > 0)
-               {
-                  if ((a & 0x0F) > (b & 0x0F))
-                  {
-                     b++;
-                  }
-                  else if ((a & 0x0F) < (b & 0x0F))
-                  {
-                     b--;
-                  }
-               }
-
-               ((LPBYTE)(gpScreenBak->pixels))[k] = ((a & 0xF0) | (b & 0x0F));
-            }
-         }
+         VIDEO_CrossFadeStep(gpScreen, gpScreenBak, rgIndex[j], i > 0);
 
          //
          // Draw the backup buffer to the screen
@@ -1585,7 +1637,7 @@ VIDEO_FadeScreen(
 
             VIDEO_FillScreenRealBlack(&dstrect);
 #if SDL_VERSION_ATLEAST(2, 0, 0)
-            gRenderBackend.RenderCopy();
+            VIDEO_ShowFrame();
 #else
 			SDL_UpdateRect(gpScreenReal, 0, 0, gpScreenReal->w, gpScreenReal->h);
 #endif
@@ -1600,7 +1652,7 @@ VIDEO_FadeScreen(
 
             VIDEO_BlitToScreenReal(gpScreenBak, NULL, &dstrect);
 #if SDL_VERSION_ATLEAST(2, 0, 0)
-            gRenderBackend.RenderCopy();
+            VIDEO_ShowFrame();
 #else
             SDL_UpdateRect(gpScreenReal, 0, 0, gpScreenReal->w, gpScreenReal->h);
 #endif
@@ -1682,6 +1734,15 @@ VIDEO_CreateCompatibleSizedSurface(
     int h = pSize ? pSize->h : pSource->h;
     SDL_Surface* dest = gfUseGPU ? VIDEO_GPU_CreateSurface(w, h)
         : SDL_CreateSurface(w, h, SDL_GetPixelFormatDetails(pSource->format)->format);
+
+    //
+    // The GPU holds the only copy of a surface, and without one the game would go on with
+    // pictures quietly missing.
+    //
+    if (dest == NULL && gfUseGPU)
+    {
+        TerminateOnError("Could not create a surface on the GPU: %s\n", SDL_GetError());
+    }
 #else
 	SDL_Surface *dest = SDL_CreateRGBSurface(pSource->flags,
 		pSize ? pSize->w : pSource->w,
@@ -1782,7 +1843,7 @@ VIDEO_DrawSurfaceToScreen(
    //
    // Draw the surface to screen.
    //
-   if (g_bRenderPaused)
+   if (g_bRenderPaused || g_bAppInBackground)
    {
       return;
    }
@@ -1794,7 +1855,7 @@ VIDEO_DrawSurfaceToScreen(
    }
 #endif
    SDL_BlitScaled(pSurface, NULL, gpScreenReal, NULL);
-   gRenderBackend.RenderCopy();
+   VIDEO_ShowFrame();
 #else
    SDL_Surface   *pCompatSurface;
    SDL_Rect       rect;

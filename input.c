@@ -1390,6 +1390,16 @@ PAL_ProcessEvent(
 #endif
    while (PAL_PollEvent(NULL));
 
+   //
+   // The game waits here while it is in the background, without drawing anything. That also
+   // keeps work for the GPU from piling up, as none of it can be submitted from there.
+   //
+   while (g_bAppInBackground)
+   {
+      SDL_Delay(50);
+      while (PAL_PollEvent(NULL));
+   }
+
    PAL_UpdateKeyboardState();
 #if PAL_HAS_JOYSTICKS
    if(g_InputState.joystickNeedUpdate)

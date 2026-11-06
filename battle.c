@@ -627,9 +627,8 @@ PAL_BattleFadeScene(
 
 --*/
 {
-   int               i, j, k;
+   int               i, j;
    DWORD             time;
-   BYTE              a, b;
    const int         rgIndex[6] = {0, 3, 1, 5, 2, 4};
    
    time = SDL_GetTicks();
@@ -645,28 +644,7 @@ PAL_BattleFadeScene(
          // Blend the pixels in the 2 buffers, and put the result into the
          // backup buffer
          //
-         if (!VIDEO_GPU_CrossFadeStep(g_Battle.lpSceneBuf, gpScreenBak, rgIndex[j], i > 0))
-         {
-            for (k = rgIndex[j]; k < gpScreen->pitch * gpScreen->h; k += 6)
-            {
-               a = ((LPBYTE)(g_Battle.lpSceneBuf->pixels))[k];
-               b = ((LPBYTE)(gpScreenBak->pixels))[k];
-
-               if (i > 0)
-               {
-                  if ((a & 0x0F) > (b & 0x0F))
-                  {
-                     b++;
-                  }
-                  else if ((a & 0x0F) < (b & 0x0F))
-                  {
-                     b--;
-                  }
-               }
-
-               ((LPBYTE)(gpScreenBak->pixels))[k] = ((a & 0xF0) | (b & 0x0F));
-            }
-         }
+         VIDEO_CrossFadeStep(g_Battle.lpSceneBuf, gpScreenBak, rgIndex[j], i > 0);
 
          //
          // Draw the backup buffer to the screen

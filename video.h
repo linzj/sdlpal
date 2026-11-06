@@ -99,6 +99,14 @@ VIDEO_FillRect(
 );
 
 VOID
+VIDEO_CrossFadeStep(
+   SDL_Surface    *lpFrom,
+   SDL_Surface    *lpTo,
+   INT             iPhase,
+   BOOL            fStep
+);
+
+VOID
 VIDEO_FreeSurface(
    SDL_Surface    *lpSurface
 );

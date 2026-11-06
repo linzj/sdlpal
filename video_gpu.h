@@ -120,6 +120,13 @@ VIDEO_GPU_DrawRLE(
 );
 
 BOOL
+VIDEO_GPU_IsGlyphCached(
+   DWORD           dwKey,
+   INT             iWidth,
+   INT             iHeight
+);
+
+BOOL
 VIDEO_GPU_DrawGlyph(
    SDL_Surface    *pDst,
    DWORD           dwKey,
@@ -250,6 +257,7 @@ PAL_C_LINKAGE_END
 #define VIDEO_GPU_BeginPartialImage(s)        ((BYTE *)NULL)
 #define VIDEO_GPU_EndPartialImage(s)          ((void)0)
 #define VIDEO_GPU_DrawRLE(r, s, p, m, c, b)   FALSE
+#define VIDEO_GPU_IsGlyphCached(k, w, h)      FALSE
 #define VIDEO_GPU_DrawGlyph(s, k, m, w, h, x, y, sx, sw, c) FALSE
 #define VIDEO_GPU_Fill(s, r, c)               FALSE
 #define VIDEO_GPU_Blit(s, sr, d, dr)          FALSE

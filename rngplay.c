@@ -205,7 +205,7 @@ PAL_RNGDecodeFrame(
          //
          // End
          //
-         goto end;
+         return;
 
       case 0x02:
          dst_ptr += 2;
@@ -376,9 +376,6 @@ PAL_RNGDecodeFrame(
          break;
       }
    }
-
-end:
-   return;
 }
 
 static INT
@@ -410,11 +407,6 @@ PAL_RNGBlitToSurface(
 
 --*/
 {
-   int                   ptr         = 0;
-   int                   dst_ptr     = 0;
-   uint16_t              wdata       = 0;
-   int                   x, y, i, n;
-
    BYTE *pImage;
 
    //

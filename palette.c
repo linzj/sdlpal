@@ -150,10 +150,7 @@ PAL_FadeOut(
    //
    // Get the original palette...
    //
-   for (i = 0; i < 256; i++)
-   {
-      palette[i] = VIDEO_GetPalette()[i];
-   }
+   memcpy(palette, VIDEO_GetPalette(), sizeof(palette));
 
    memset(newpalette, 0xff, sizeof(SDL_Color)*256);
 
@@ -427,10 +424,7 @@ PAL_PaletteFade(
       return;
    }
 
-   for (i = 0; i < 256; i++)
-   {
-      palette[i] = VIDEO_GetPalette()[i];
-   }
+   memcpy(palette, VIDEO_GetPalette(), sizeof(palette));
 
    //
    // Start fading...
