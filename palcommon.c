@@ -698,7 +698,11 @@ PAL_FBPBlitToSurface(
    //
    // simply copy everything to the surface
    //
-   VIDEO_GPU_PrepareCPUOverwrite(lpDstSurface);
+   if (VIDEO_GPU_WriteImage(lpDstSurface, lpBitmapFBP))
+   {
+      return 0;
+   }
+
    for (y = 0; y < 200; y++)
    {
       p = (LPBYTE)(lpDstSurface->pixels) + y * lpDstSurface->pitch;
@@ -707,7 +711,6 @@ PAL_FBPBlitToSurface(
          *(p++) = *(lpBitmapFBP++);
       }
    }
-   VIDEO_GPU_FinishCPUWrite(lpDstSurface);
 
    return 0;
 }

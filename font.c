@@ -590,7 +590,7 @@ PAL_DrawCharOnSurface(
 				fDone = VIDEO_GPU_DrawGlyph(lpSurface, wChar, rgMask, w, h, x + 8 + x_offset, top_row, 8, 8, bColor);
 		}
 
-		if (fDone)
+		if (fDone || lpSurface->pixels == NULL)
 		{
 			return;
 		}

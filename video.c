@@ -285,7 +285,24 @@ VIDEO_Startup(
 #if PAL_HAS_SDL_GPU
    if (gfUseGPU && VIDEO_GPU_ClaimWindow(gpWindow))
    {
-      gRenderBackend.RenderCopy = VIDEO_GPU_Present;
+      gpScreen = VIDEO_GPU_CreateSurface(320, 200);
+      gpScreenBak = VIDEO_GPU_CreateSurface(320, 200);
+
+      if (gpScreen != NULL && gpScreenBak != NULL)
+      {
+         gRenderBackend.RenderCopy = VIDEO_GPU_Present;
+      }
+      else
+      {
+         //
+         // Without these there is nothing to draw on, so the SDL renderer takes over.
+         //
+         VIDEO_GPU_Shutdown();
+         SDL_FreeSurface(gpScreen);
+         SDL_FreeSurface(gpScreenBak);
+         gpScreen = gpScreenBak = NULL;
+         gfUseGPU = FALSE;
+      }
    }
    else
    {
@@ -330,18 +347,23 @@ VIDEO_Startup(
    //
    // Create the screen buffer and the backup screen buffer.
    //
-   gpScreen = SDL_CreateRGBSurface(SDL_SWSURFACE, 320, 200, 8, 0, 0, 0, 0);
-   gpScreenBak = SDL_CreateRGBSurface(SDL_SWSURFACE, 320, 200, 8, 0, 0, 0, 0);
-   gpScreenReal = SDL_CreateRGBSurface(SDL_SWSURFACE, 320, 200, 32,
-                                       0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
-
 #if PAL_HAS_SDL_GPU
    if (gfUseGPU)
    {
-      VIDEO_GPU_RegisterSurface(gpScreen);
-      VIDEO_GPU_RegisterSurface(gpScreenBak);
+      //
+      // The screen is on the GPU, and this one only says what size it is.
+      //
+      gpScreenReal = SDL_CreateRGBSurfaceFrom(NULL, 320, 200, 32, 320 * 4,
+                                              0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
    }
+   else
 #endif
+   {
+      gpScreen = SDL_CreateRGBSurface(SDL_SWSURFACE, 320, 200, 8, 0, 0, 0, 0);
+      gpScreenBak = SDL_CreateRGBSurface(SDL_SWSURFACE, 320, 200, 8, 0, 0, 0, 0);
+      gpScreenReal = SDL_CreateRGBSurface(SDL_SWSURFACE, 320, 200, 32,
+                                          0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
+   }
 
    //
    // Create texture for screen.
@@ -1299,12 +1321,29 @@ VIDEO_SaveScreenshot(
 	//
 	// Save the screenshot.
 	//
-	VIDEO_GPU_PrepareCPUAccess(gpScreen);
+#if PAL_HAS_SDL_GPU
+	if (gfUseGPU)
+	{
+		//
+		// The screen is on the GPU, so the file gets a copy of its own. Palette fades on the
+		// GPU leave the palette behind, and VIDEO_GetPalette() catches it up.
+		//
+		SDL_Surface *pCopy = SDL_CreateSurface(320, 200, SDL_PIXELFORMAT_INDEX8);
+
+		if (pCopy != NULL)
+		{
+			VIDEO_GetPalette();
+			VIDEO_UpdateSurfacePalette(pCopy);
+			if (VIDEO_GPU_ReadSurface(gpScreen, (BYTE *)pCopy->pixels, pCopy->pitch))
+			{
+				SDL_SaveBMP(pCopy, PAL_CombinePath(0, gConfig.pszSavePath, filename));
+			}
+			SDL_FreeSurface(pCopy);
+		}
+		return;
+	}
+#endif
 #if SDL_VERSION_ATLEAST(2,0,0)
-	//
-	// Palette fades on the GPU leave the palette of the surface behind; this catches it up.
-	//
-	VIDEO_GetPalette();
 	SDL_SaveBMP(gpScreen, PAL_CombinePath(0, gConfig.pszSavePath, filename));
 #else
 	SDL_SaveBMP(gpScreenReal, PAL_CombinePath(0, gConfig.pszSavePath, filename));
@@ -1639,10 +1678,10 @@ VIDEO_CreateCompatibleSizedSurface(
 	// Create the surface
 	//
 #if SDL_VERSION_ATLEAST(3,0,0)
-    SDL_Surface* dest = SDL_CreateSurface(
-        pSize ? pSize->w : pSource->w,
-        pSize ? pSize->h : pSource->h,
-        SDL_GetPixelFormatDetails(pSource->format)->format);
+    int w = pSize ? pSize->w : pSource->w;
+    int h = pSize ? pSize->h : pSource->h;
+    SDL_Surface* dest = gfUseGPU ? VIDEO_GPU_CreateSurface(w, h)
+        : SDL_CreateSurface(w, h, SDL_GetPixelFormatDetails(pSource->format)->format);
 #else
 	SDL_Surface *dest = SDL_CreateRGBSurface(pSource->flags,
 		pSize ? pSize->w : pSource->w,
@@ -1655,12 +1694,6 @@ VIDEO_CreateCompatibleSizedSurface(
 	if (dest)
 	{
 		VIDEO_UpdateSurfacePalette(dest);
-#if PAL_HAS_SDL_GPU
-		if (gfUseGPU)
-		{
-			VIDEO_GPU_RegisterSurface(dest);
-		}
-#endif
 	}
 
 	return dest;

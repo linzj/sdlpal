@@ -61,12 +61,14 @@ VIDEO_GPU_SetOverlay(
 );
 
 //
-// Surfaces. A registered 8-bit surface lives on the GPU as well as in its pixels member.
-// CPU code touching those pixels must bracket the access with these functions.
+// Surfaces. An 8-bit surface lives only on the GPU, and its pixels member is NULL unless
+// every operation is being checked against its software version (see the comment at the
+// top of video_gpu.c). The CPU exchanges images with it through these functions.
 //
-VOID
-VIDEO_GPU_RegisterSurface(
-   SDL_Surface    *pSurface
+SDL_Surface *
+VIDEO_GPU_CreateSurface(
+   int             iWidth,
+   int             iHeight
 );
 
 VOID
@@ -79,18 +81,26 @@ VIDEO_GPU_IsTarget(
    SDL_Surface    *pSurface
 );
 
-VOID
-VIDEO_GPU_PrepareCPUAccess(
+BOOL
+VIDEO_GPU_ReadSurface(
+   SDL_Surface    *pSurface,
+   BYTE           *pDst,
+   int             iPitch
+);
+
+BOOL
+VIDEO_GPU_WriteImage(
+   SDL_Surface    *pSurface,
+   const BYTE     *pIndices
+);
+
+BYTE *
+VIDEO_GPU_BeginPartialImage(
    SDL_Surface    *pSurface
 );
 
 VOID
-VIDEO_GPU_PrepareCPUOverwrite(
-   SDL_Surface    *pSurface
-);
-
-VOID
-VIDEO_GPU_FinishCPUWrite(
+VIDEO_GPU_EndPartialImage(
    SDL_Surface    *pSurface
 );
 
@@ -234,10 +244,11 @@ PAL_C_LINKAGE_END
 //
 // Without SDL_GPU nothing is ever on the GPU, so callers always use their CPU path.
 //
+#define VIDEO_GPU_CreateSurface(w, h)         NULL
 #define VIDEO_GPU_IsTarget(s)                 FALSE
-#define VIDEO_GPU_PrepareCPUAccess(s)         ((void)0)
-#define VIDEO_GPU_PrepareCPUOverwrite(s)      ((void)0)
-#define VIDEO_GPU_FinishCPUWrite(s)           ((void)0)
+#define VIDEO_GPU_WriteImage(s, p)            FALSE
+#define VIDEO_GPU_BeginPartialImage(s)        ((BYTE *)NULL)
+#define VIDEO_GPU_EndPartialImage(s)          ((void)0)
 #define VIDEO_GPU_DrawRLE(r, s, p, m, c, b)   FALSE
 #define VIDEO_GPU_DrawGlyph(s, k, m, w, h, x, y, sx, sw, c) FALSE
 #define VIDEO_GPU_Fill(s, r, c)               FALSE

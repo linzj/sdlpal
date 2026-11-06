@@ -20,21 +20,18 @@
 // video_gpu.c: Renders the game through SDL_GPU, which means Vulkan on Windows, Linux
 //              and Android and Metal on macOS and iOS.
 //
-// The game is still 8-bit: every 8-bit SDL_Surface it draws to has an R8 texture holding
-// the same palette indices, and each software drawing routine has an exact GPU version
-// here. Sprites and glyphs are decoded once into an atlas and drawn as instances in
-// batches. Reads of the destination, which blending cannot express (shadows, the wave,
-// cross-fades), go through a copy of the surface. Anything that stays on the CPU (FBP
-// pictures, RNG animations) is uploaded when next needed, and a surface is downloaded
-// only if the CPU has to read it after GPU drawing.
+// The game is still 8-bit, but its surfaces live on the GPU: each one is an R8 texture
+// holding palette indices, and its SDL_Surface has no pixels at all, so there is only one
+// copy of its contents. Each software drawing routine has an exact GPU version here.
+// Sprites and glyphs are decoded once into an atlas and drawn as instances in batches.
+// Reads of the destination, which blending cannot express (shadows, the wave, cross-fades),
+// go through a copy of the surface. FBP pictures and RNG frames are decoded on the CPU and
+// only ever uploaded. The one thing read back is a screenshot being saved.
 //
 // Setting the environment variable SDLPAL_GPU_VERIFY=1 runs every drawing operation both
-// ways, so the pixels of a surface hold the software result and its texture the GPU result.
-// Each presented frame and each surface download is compared with the software result, as
-// is the palette worked out during a fade, and any difference is logged as [GPUVERIFY]. Use
-// it after changing any drawing code. Apart from the CPU drawing as well, this takes the
-// same path as a normal run. The one thing it cannot notice is CPU code reading pixels
-// without calling VIDEO_GPU_PrepareCPUAccess() first, since here those pixels are current.
+// ways. Only in this mode do surfaces get pixels, which hold the software result. Each
+// presented frame is compared with it, as is the palette worked out during a fade, and any
+// difference is logged as [GPUVERIFY]. Use it after changing any drawing code.
 //
 // Only SPIR-V and MSL shaders are provided, so SDL_GPU never selects D3D12. When neither
 // Vulkan nor Metal is usable VIDEO_GPU_Init() fails and video.c falls back to software
@@ -66,6 +63,7 @@
 #define VERTEX_RING      (MAX_INSTANCES * 8 * (int)sizeof(GPUINSTANCE))
 #define MAX_BAND_RECTS   16
 #define MAX_SHOWN_RECTS  (1 + 3 * MAX_BAND_RECTS)
+#define PARTIAL_BYTES    (SCREEN_PIXELS * 2)
 
 #define FNV_OFFSET       0xCBF29CE484222325ULL
 #define FNV_PRIME        0x100000001B3ULL
@@ -80,8 +78,6 @@ typedef struct tagGPUSURFACE
 {
    SDL_Surface    *pSurface;
    SDL_GPUTexture *pTexture;
-   BOOL            fCPUStale;  // the texture has drawing the pixels do not
-   BOOL            fGPUStale;  // the pixels have writes the texture does not
 } GPUSURFACE;
 
 typedef struct tagGPUINSTANCE
@@ -164,6 +160,7 @@ static struct
    ATLASENTRY              *pAtlasEntries;
    int                      nAtlasEntries;
    int                      iShelfX, iShelfY, iShelfHeight;
+   Uint64                   qwOneOffImages;
 
    int                      iFilter;
    int                      iScale;
@@ -303,51 +300,6 @@ VIDEO_GPU_UploadRegion(
    destination.d = 1;
 
    SDL_UploadToGPUTexture(pCopyPass, &source, &destination, false);
-}
-
-static VOID
-VIDEO_GPU_UploadPixels(
-   SDL_Surface     *pSurface,
-   const SDL_Rect  *pArea,
-   SDL_GPUTexture  *pTexture,
-   const SDL_Point *pPosition
-)
-/*++
-  Purpose:
-
-    Copy an area of the pixels of an 8-bit surface to a texture.
-
-  Parameters:
-
-    [IN]  pSurface - the surface.
-
-    [IN]  pArea - the area to copy.
-
-    [OUT] pTexture - the texture.
-
-    [IN]  pPosition - where to copy to.
-
-  Return value:
-
-    None.
-
---*/
-{
-   SDL_GPUCopyPass *pCopyPass;
-   BYTE            *pMapped;
-   Uint32           uiOffset;
-   int              y;
-
-   pMapped = VIDEO_GPU_RingMap(pArea->w * pArea->h, &uiOffset);
-   for (y = 0; y < pArea->h; y++)
-   {
-      memcpy(pMapped + y * pArea->w, (const BYTE *)pSurface->pixels + (pArea->y + y) * pSurface->pitch + pArea->x, pArea->w);
-   }
-   SDL_UnmapGPUTransferBuffer(gGPU.pDevice, gGPU.pRing);
-
-   pCopyPass = SDL_BeginGPUCopyPass(VIDEO_GPU_Commands());
-   VIDEO_GPU_UploadRegion(pCopyPass, gGPU.pRing, uiOffset, pTexture, pPosition->x, pPosition->y, pArea->w, pArea->h);
-   SDL_EndGPUCopyPass(pCopyPass);
 }
 
 static VOID
@@ -499,51 +451,6 @@ VIDEO_GPU_FindFreeSlot(
 }
 
 static VOID
-VIDEO_GPU_EnsureOnGPU(
-   GPUSURFACE *pEntry
-)
-/*++
-  Purpose:
-
-    Bring the texture of a surface up to date with CPU writes made to its pixels.
-
-  Parameters:
-
-    [IN]  pEntry - the surface.
-
-  Return value:
-
-    None.
-
---*/
-{
-   SDL_Rect  whole;
-   SDL_Point origin = { 0, 0 };
-
-   if (!pEntry->fGPUStale)
-   {
-      return;
-   }
-
-   VIDEO_GPU_FlushBatch();
-
-   whole.x = whole.y = 0;
-   whole.w = pEntry->pSurface->w;
-   whole.h = pEntry->pSurface->h;
-   VIDEO_GPU_UploadPixels(pEntry->pSurface, &whole, pEntry->pTexture, &origin);
-
-   pEntry->fGPUStale = FALSE;
-}
-
-static VOID
-VIDEO_GPU_MarkDrawn(
-   GPUSURFACE *pEntry
-)
-{
-   pEntry->fCPUStale = TRUE;
-}
-
-static VOID
 VIDEO_GPU_CopyRegion(
    SDL_GPUTexture  *pSrc,
    const SDL_Rect  *pSrcRect,
@@ -613,78 +520,110 @@ VIDEO_GPU_IsScreenSized(
 }
 
 static BOOL
-VIDEO_GPU_FallBackToCPU(
-   GPUSURFACE *pEntry
+VIDEO_GPU_NotOnGPU(
+   VOID
 )
 /*++
   Purpose:
 
-    For an operation with no GPU version here: make the pixels current, since the CPU
-    is about to draw on them, and have them uploaded afterwards.
+    Work out what a drawing function returns when a surface it was given is not on the
+    GPU. With the GPU in use every 8-bit surface is on it, so this can only be a NULL
+    surface, which there is nothing to do with. Otherwise everything is on the CPU.
 
   Parameters:
-
-    [IN]  pEntry - the surface about to be drawn on; NULL if it is not on the GPU.
-
-  Return value:
-
-    FALSE, which is what the drawing functions return for "the caller has to do it".
-
---*/
-{
-   if (pEntry != NULL)
-   {
-      VIDEO_GPU_PrepareCPUAccess(pEntry->pSurface);
-      pEntry->fGPUStale = TRUE;
-   }
-   return FALSE;
-}
-
-VOID
-VIDEO_GPU_RegisterSurface(
-   SDL_Surface    *pSurface
-)
-/*++
-  Purpose:
-
-    Create the texture of an 8-bit surface. Surfaces that do not fit, or whose texture
-    cannot be created, stay on the CPU, which is slower but still correct.
-
-  Parameters:
-
-    [IN]  pSurface - the surface.
-
-  Return value:
 
     None.
 
+  Return value:
+
+    TRUE if there is nothing left to do. FALSE if the caller has to do it on the CPU.
+
 --*/
 {
-   GPUSURFACE *pEntry;
+   return gGPU.pDevice != NULL;
+}
 
-   if (gGPU.pDevice == NULL || pSurface == NULL || SDL_BITSPERPIXEL(pSurface->format) != 8)
-   {
-      return;
-   }
+static BOOL
+VIDEO_GPU_WrongSize(
+   VOID
+)
+/*++
+  Purpose:
 
-   pEntry = VIDEO_GPU_FindFreeSlot();
+    Give up on an effect because of the size of its surface. These work on a copy of the
+    surface, which holds 320x200, and the game has no larger surfaces.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    What the drawing function should return.
+
+--*/
+{
+   UTIL_LogOutput(LOGLEVEL_ERROR, "This effect does not work on a surface of this size\n");
+   return !gGPU.fVerify;
+}
+
+SDL_Surface *
+VIDEO_GPU_CreateSurface(
+   int             iWidth,
+   int             iHeight
+)
+/*++
+  Purpose:
+
+    Create an 8-bit surface on the GPU. It has no pixels, unless every operation is being
+    verified: its texture is the only copy of its contents.
+
+  Parameters:
+
+    [IN]  iWidth - width of the surface.
+
+    [IN]  iHeight - height of the surface.
+
+  Return value:
+
+    The surface, which starts out as all zeros. NULL if it could not be created.
+
+--*/
+{
+   GPUSURFACE            *pEntry = VIDEO_GPU_FindFreeSlot();
+   SDL_Surface           *pSurface;
+   SDL_GPUColorTargetInfo target;
+
    if (pEntry == NULL)
    {
-      UTIL_LogOutput(LOGLEVEL_WARNING, "Too many surfaces for the GPU; drawing this one on the CPU\n");
-      return;
+      UTIL_LogOutput(LOGLEVEL_ERROR, "Too many surfaces for the GPU\n");
+      return NULL;
+   }
+
+   pSurface = gGPU.fVerify ? SDL_CreateSurface(iWidth, iHeight, SDL_PIXELFORMAT_INDEX8)
+      : SDL_CreateSurfaceFrom(iWidth, iHeight, SDL_PIXELFORMAT_INDEX8, NULL, iWidth);
+   if (pSurface == NULL)
+   {
+      return NULL;
    }
 
    pEntry->pTexture = VIDEO_GPU_CreateTexture(SDL_GPU_TEXTUREFORMAT_R8_UNORM,
-      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, pSurface->w, pSurface->h);
+      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, iWidth, iHeight);
    if (pEntry->pTexture == NULL)
    {
       UTIL_LogOutput(LOGLEVEL_WARNING, "Surface texture could not be created: %s\n", SDL_GetError());
-      return;
+      SDL_DestroySurface(pSurface);
+      return NULL;
    }
-
    pEntry->pSurface = pSurface;
-   pEntry->fCPUStale = FALSE;
-   pEntry->fGPUStale = TRUE;
+
+   SDL_zero(target);
+   target.texture = pEntry->pTexture;
+   target.load_op = SDL_GPU_LOADOP_CLEAR;
+   target.store_op = SDL_GPU_STOREOP_STORE;
+   SDL_EndGPURenderPass(SDL_BeginGPURenderPass(VIDEO_GPU_Commands(), &target, 1, NULL));
+
+   return pSurface;
 }
 
 VOID
@@ -794,23 +733,29 @@ VIDEO_GPU_CheckDownload(
    }
 }
 
-VOID
-VIDEO_GPU_PrepareCPUAccess(
-   SDL_Surface    *pSurface
+BOOL
+VIDEO_GPU_ReadSurface(
+   SDL_Surface    *pSurface,
+   BYTE           *pDst,
+   int             iPitch
 )
 /*++
   Purpose:
 
-    Make the pixels of a surface current before the CPU reads or changes them. This has
-    to wait for the GPU, so it should stay rare.
+    Read a surface from the GPU. This has to wait for the GPU, so it is only for things
+    like saving a screenshot. Nothing that happens during play needs it.
 
   Parameters:
 
     [IN]  pSurface - the surface.
 
+    [OUT] pDst - receives the palette indices.
+
+    [IN]  iPitch - bytes per row of pDst.
+
   Return value:
 
-    None.
+    TRUE if done. FALSE if the surface is not on the GPU.
 
 --*/
 {
@@ -822,9 +767,9 @@ VIDEO_GPU_PrepareCPUAccess(
    const BYTE                *pMapped;
    int                        y;
 
-   if (pEntry == NULL || !pEntry->fCPUStale)
+   if (pEntry == NULL)
    {
-      return;
+      return FALSE;
    }
 
    VIDEO_GPU_WaitForForeground();
@@ -856,27 +801,72 @@ VIDEO_GPU_PrepareCPUAccess(
    {
       VIDEO_GPU_CheckDownload(pSurface, pMapped);
    }
-   else
+   for (y = 0; y < pSurface->h; y++)
    {
-      for (y = 0; y < pSurface->h; y++)
-      {
-         memcpy((BYTE *)pSurface->pixels + y * pSurface->pitch, pMapped + y * pSurface->w, pSurface->w);
-      }
+      memcpy(pDst + y * iPitch, pMapped + y * pSurface->w, pSurface->w);
    }
    SDL_UnmapGPUTransferBuffer(gGPU.pDevice, gGPU.pDownload);
 
-   pEntry->fCPUStale = FALSE;
+   return TRUE;
 }
 
-VOID
-VIDEO_GPU_PrepareCPUOverwrite(
+BOOL
+VIDEO_GPU_WriteImage(
+   SDL_Surface    *pSurface,
+   const BYTE     *pIndices
+)
+/*++
+  Purpose:
+
+    Replace all of a surface with an image decoded on the CPU.
+
+  Parameters:
+
+    [OUT] pSurface - the surface.
+
+    [IN]  pIndices - the palette indices of the image, with no gaps between the rows.
+
+  Return value:
+
+    TRUE if done. FALSE if the caller still has to write them to the pixels of the surface.
+
+--*/
+{
+   GPUSURFACE      *pEntry = VIDEO_GPU_FindSurface(pSurface);
+   SDL_GPUCopyPass *pCopyPass;
+   BYTE            *pMapped;
+   Uint32           uiOffset, uiBytes;
+
+   if (pEntry == NULL)
+   {
+      return FALSE;
+   }
+
+   VIDEO_GPU_FlushBatch();
+
+   uiBytes = pSurface->w * pSurface->h;
+   pMapped = VIDEO_GPU_RingMap(uiBytes, &uiOffset);
+   memcpy(pMapped, pIndices, uiBytes);
+   SDL_UnmapGPUTransferBuffer(gGPU.pDevice, gGPU.pRing);
+
+   pCopyPass = SDL_BeginGPUCopyPass(VIDEO_GPU_Commands());
+   VIDEO_GPU_UploadRegion(pCopyPass, gGPU.pRing, uiOffset, pEntry->pTexture, 0, 0, pSurface->w, pSurface->h);
+   SDL_EndGPUCopyPass(pCopyPass);
+
+   return !gGPU.fVerify;
+}
+
+BYTE *
+VIDEO_GPU_BeginPartialImage(
    SDL_Surface    *pSurface
 )
 /*++
   Purpose:
 
-    Like VIDEO_GPU_PrepareCPUAccess(), when the CPU is about to replace every pixel and
-    so has no need for the current ones.
+    Start an image that changes only some pixels of a 320x200 surface, decoded on the CPU.
+    The pixels it leaves alone keep what they have, like the transparent parts of a sprite,
+    so this needs no knowledge of what the surface holds. It takes a part of the atlas
+    kept free for it.
 
   Parameters:
 
@@ -884,29 +874,37 @@ VIDEO_GPU_PrepareCPUOverwrite(
 
   Return value:
 
-    None.
+    Where to write the image, cleared: 320x200 with two bytes per pixel, the palette index
+    and then 0xFF for a pixel to change. NULL if the surface is not on the GPU.
 
 --*/
 {
-   GPUSURFACE *pEntry = VIDEO_GPU_FindSurface(pSurface);
+   ATLASUPLOAD *pUpload;
+   BYTE        *pPixels;
 
-   if (pEntry != NULL)
+   if (VIDEO_GPU_FindSurface(pSurface) == NULL)
    {
-      pEntry->fCPUStale = FALSE;
+      return NULL;
    }
-}
 
-VOID
-VIDEO_GPU_FinishCPUWrite(
-   SDL_Surface    *pSurface
-)
-{
-   GPUSURFACE *pEntry = VIDEO_GPU_FindSurface(pSurface);
-
-   if (pEntry != NULL)
+   if (gGPU.uiStageUsed + PARTIAL_BYTES > STAGE_BYTES || gGPU.nUploads == MAX_UPLOADS)
    {
-      pEntry->fGPUStale = TRUE;
+      VIDEO_GPU_FlushBatch();
    }
+
+   pPixels = gGPU.pStage + gGPU.uiStageUsed;
+   memset(pPixels, 0, PARTIAL_BYTES);
+
+   pUpload = &gGPU.pUploads[gGPU.nUploads++];
+   pUpload->offset = gGPU.uiStageUsed;
+   pUpload->x = 0;
+   pUpload->y = 0;
+   pUpload->w = SCREEN_WIDTH;
+   pUpload->h = SCREEN_HEIGHT;
+
+   gGPU.uiStageUsed += PARTIAL_BYTES;
+
+   return pPixels;
 }
 
 static VOID
@@ -944,6 +942,33 @@ VIDEO_GPU_AddInstance(
    pInstance->unused = 0;
 }
 
+VOID
+VIDEO_GPU_EndPartialImage(
+   SDL_Surface    *pSurface
+)
+/*++
+  Purpose:
+
+    Draw the image started by VIDEO_GPU_BeginPartialImage().
+
+  Parameters:
+
+    [OUT] pSurface - the surface.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   VIDEO_GPU_AddInstance(VIDEO_GPU_FindSurface(pSurface), 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, kGPUDrawNormal, 0, 0);
+
+   //
+   // The next image goes to the same part of the atlas.
+   //
+   VIDEO_GPU_FlushBatch();
+}
+
 static VOID
 VIDEO_GPU_AtlasReset(
    VOID
@@ -955,7 +980,8 @@ VIDEO_GPU_AtlasReset(
    VIDEO_GPU_FlushBatch();
    memset(gGPU.pAtlasEntries, 0, ATLAS_SLOTS * sizeof(ATLASENTRY));
    gGPU.nAtlasEntries = 0;
-   gGPU.iShelfX = gGPU.iShelfY = gGPU.iShelfHeight = 0;
+   gGPU.iShelfX = gGPU.iShelfHeight = 0;
+   gGPU.iShelfY = SCREEN_HEIGHT;   // the top is kept for partial images
 }
 
 static ATLASENTRY *
@@ -990,7 +1016,7 @@ VIDEO_GPU_AtlasAdd(
 
     [IN]  w - width of the image, at most ATLAS_SIZE. All its pixels must fit in STAGE_BYTES.
 
-    [IN]  h - height of the image, at most ATLAS_SIZE.
+    [IN]  h - height of the image, at most ATLAS_SIZE - SCREEN_HEIGHT.
 
     [OUT] ppEntry - the new atlas entry.
 
@@ -1127,7 +1153,7 @@ VIDEO_GPU_CacheRLE(
    UINT        uiLen = uiWidth * uiHeight, i;
    BYTE        T;
 
-   if (uiWidth > ATLAS_SIZE || uiHeight > ATLAS_SIZE || uiLen * 2 > STAGE_BYTES)
+   if (uiWidth > ATLAS_SIZE || uiHeight > ATLAS_SIZE - SCREEN_HEIGHT || uiLen * 2 > STAGE_BYTES)
    {
       return NULL;
    }
@@ -1192,6 +1218,75 @@ VIDEO_GPU_CacheRLE(
    return pEntry;
 }
 
+static const ATLASENTRY *
+VIDEO_GPU_DecodeVisiblePart(
+   const BYTE     *pData,
+   UINT            uiWidth,
+   UINT            uiHeight,
+   const SDL_Rect *pVisible
+)
+/*++
+  Purpose:
+
+    Decode the part of a bitmap that shows, for a bitmap too big for the atlas. Surfaces
+    are small, so that part always fits. It is good for one draw and is not looked up again.
+
+  Parameters:
+
+    [IN]  pData - where the pixel data of the bitmap starts.
+
+    [IN]  uiWidth - width of the bitmap.
+
+    [IN]  uiHeight - height of the bitmap.
+
+    [IN]  pVisible - the part to decode, in pixels of the bitmap.
+
+  Return value:
+
+    The atlas entry.
+
+--*/
+{
+   const BYTE *p = pData;
+   ATLASENTRY *pEntry;
+   BYTE       *pPixels;
+   Uint64      hash = ((++gGPU.qwOneOffImages * FNV_PRIME) ^ 0x1C0DEC0DE0000ULL) | 1;
+   UINT        uiEnd = uiWidth * (UINT)(pVisible->y + pVisible->h);
+   UINT        uiLen = uiWidth * uiHeight, i, j;
+   BYTE        T;
+
+   pPixels = VIDEO_GPU_AtlasAdd(hash, pVisible->w, pVisible->h, &pEntry);
+
+   //
+   // Like the software routines, this stops at the bottom edge of the surface.
+   //
+   for (i = 0; i < uiLen && i < uiEnd;)
+   {
+      T = *p++;
+      if ((T & 0x80) && T <= 0x80 + uiWidth)
+      {
+         i += T - 0x80;
+         continue;
+      }
+
+      for (j = 0; j < T; j++)
+      {
+         int x = (int)((i + j) % uiWidth) - pVisible->x;
+         int y = (int)((i + j) / uiWidth) - pVisible->y;
+
+         if (i + j < uiLen && x >= 0 && x < pVisible->w && y >= 0 && y < pVisible->h)
+         {
+            pPixels[(y * pVisible->w + x) * 2] = p[j];
+            pPixels[(y * pVisible->w + x) * 2 + 1] = 0xFF;
+         }
+      }
+      p += T;
+      i += T;
+   }
+
+   return pEntry;
+}
+
 BOOL
 VIDEO_GPU_DrawRLE(
    LPCBITMAPRLE    lpBitmapRLE,
@@ -1234,7 +1329,7 @@ VIDEO_GPU_DrawRLE(
 
    if (pTarget == NULL)
    {
-      return FALSE;
+      return VIDEO_GPU_NotOnGPU();
    }
 
    //
@@ -1248,19 +1343,30 @@ VIDEO_GPU_DrawRLE(
       return !gGPU.fVerify;
    }
 
-   if ((iMode == kGPUDrawShadow && !VIDEO_GPU_IsScreenSized(pTarget)) ||
-       iColorShift < -128 || iColorShift > 127)
+   if (iMode == kGPUDrawShadow && (pDst->w > SCREEN_WIDTH || pDst->h > SCREEN_HEIGHT))
    {
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      return VIDEO_GPU_WrongSize();
    }
 
    pEntry = VIDEO_GPU_CacheRLE(lpBitmapRLE, pData, uiWidth, uiHeight);
    if (pEntry == NULL)
    {
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      SDL_Rect visible;
+
+      visible.x = SDL_max(-x, 0);
+      visible.y = SDL_max(-y, 0);
+      visible.w = SDL_min((int)uiWidth - visible.x, pDst->w - SDL_max(x, 0));
+      visible.h = SDL_min((int)uiHeight - visible.y, pDst->h - SDL_max(y, 0));
+
+      pEntry = VIDEO_GPU_DecodeVisiblePart(pData, uiWidth, uiHeight, &visible);
+      x = SDL_max(x, 0);
+      y = SDL_max(y, 0);
    }
 
-   VIDEO_GPU_EnsureOnGPU(pTarget);
+   //
+   // The result stays the same past this range: it is clamped to 0..15 in the end.
+   //
+   iColorShift = SDL_clamp(iColorShift, -16, 16);
 
    if (iMode == kGPUDrawShadow)
    {
@@ -1287,7 +1393,6 @@ VIDEO_GPU_DrawRLE(
       VIDEO_GPU_FlushBatch();
    }
 
-   VIDEO_GPU_MarkDrawn(pTarget);
    return !gGPU.fVerify;
 }
 
@@ -1344,7 +1449,7 @@ VIDEO_GPU_DrawGlyph(
 
    if (pTarget == NULL)
    {
-      return FALSE;
+      return VIDEO_GPU_NotOnGPU();
    }
 
    //
@@ -1365,11 +1470,9 @@ VIDEO_GPU_DrawGlyph(
    }
    pEntry = pSlot;
 
-   VIDEO_GPU_EnsureOnGPU(pTarget);
    VIDEO_GPU_AddInstance(pTarget, x, y, iSrcWidth, pEntry->h, pEntry->x + iSrcX, pEntry->y,
       kGPUDrawGlyph, 0, bColor);
 
-   VIDEO_GPU_MarkDrawn(pTarget);
    return !gGPU.fVerify;
 }
 
@@ -1384,10 +1487,8 @@ VIDEO_GPU_Fill(
 
    if (pTarget == NULL)
    {
-      return FALSE;
+      return VIDEO_GPU_NotOnGPU();
    }
-
-   VIDEO_GPU_EnsureOnGPU(pTarget);
 
    if (pRect == NULL)
    {
@@ -1398,7 +1499,6 @@ VIDEO_GPU_Fill(
       VIDEO_GPU_AddInstance(pTarget, pRect->x, pRect->y, pRect->w, pRect->h, 0, 0, kGPUDrawFill, 0, bColor);
    }
 
-   VIDEO_GPU_MarkDrawn(pTarget);
    return !gGPU.fVerify;
 }
 
@@ -1483,18 +1583,8 @@ VIDEO_GPU_Blit(
 
    if (pSource == NULL || pTarget == NULL)
    {
-      //
-      // The CPU reads one and writes the other, so both have to be current for it.
-      //
-      if (pSource != NULL)
-      {
-         VIDEO_GPU_PrepareCPUAccess(pSrc);
-      }
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      return VIDEO_GPU_NotOnGPU();
    }
-
-   VIDEO_GPU_EnsureOnGPU(pSource);
-   VIDEO_GPU_EnsureOnGPU(pTarget);
 
    if (VIDEO_GPU_ClipCopy(pSrc->w, pSrc->h, pSrcRect, pDst->w, pDst->h, pDstRect, &area, &position))
    {
@@ -1502,7 +1592,6 @@ VIDEO_GPU_Blit(
       VIDEO_GPU_CopyRegion(pSource->pTexture, &area, pTarget->pTexture, &position);
    }
 
-   VIDEO_GPU_MarkDrawn(pTarget);
    return !gGPU.fVerify;
 }
 
@@ -1536,8 +1625,6 @@ VIDEO_GPU_RunEffect(
    SDL_BindGPUFragmentSamplers(pPass, 0, samplers, 2);
    SDL_DrawGPUPrimitives(pPass, 3, 1, 0, 0);
    SDL_EndGPURenderPass(pPass);
-
-   VIDEO_GPU_MarkDrawn(pTarget);
 }
 
 BOOL
@@ -1553,14 +1640,9 @@ VIDEO_GPU_ShiftBackground(
 
    if (pSource == NULL || pTarget == NULL)
    {
-      if (pSource != NULL)
-      {
-         VIDEO_GPU_PrepareCPUAccess(pSrc);
-      }
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      return VIDEO_GPU_NotOnGPU();
    }
 
-   VIDEO_GPU_EnsureOnGPU(pSource);
    VIDEO_GPU_FlushBatch();
 
    SDL_zero(params);
@@ -1568,10 +1650,6 @@ VIDEO_GPU_ShiftBackground(
    params.shift = iShift;
    VIDEO_GPU_RunEffect(pTarget, pSource->pTexture, pSource->pTexture, &params);
 
-   //
-   // Every pixel was replaced, so whatever the CPU wrote to the target no longer matters.
-   //
-   pTarget->fGPUStale = FALSE;
    return !gGPU.fVerify;
 }
 
@@ -1586,12 +1664,16 @@ VIDEO_GPU_ApplyWave(
    EFFECTPARAMS params;
    int          i;
 
-   if (pTarget == NULL || !VIDEO_GPU_IsScreenSized(pTarget))
+   if (pTarget == NULL)
    {
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      return VIDEO_GPU_NotOnGPU();
    }
 
-   VIDEO_GPU_EnsureOnGPU(pTarget);
+   if (!VIDEO_GPU_IsScreenSized(pTarget))
+   {
+      return VIDEO_GPU_WrongSize();
+   }
+
    VIDEO_GPU_FlushBatch();
    VIDEO_GPU_CopyToScratch(pTarget, NULL);
 
@@ -1619,17 +1701,16 @@ VIDEO_GPU_CrossFadeStep(
    GPUSURFACE  *pTarget = VIDEO_GPU_FindSurface(pDst);
    EFFECTPARAMS params;
 
-   if (pSource == NULL || pTarget == NULL || !VIDEO_GPU_IsScreenSized(pTarget))
+   if (pSource == NULL || pTarget == NULL)
    {
-      if (pSource != NULL)
-      {
-         VIDEO_GPU_PrepareCPUAccess(pFrom);
-      }
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      return VIDEO_GPU_NotOnGPU();
    }
 
-   VIDEO_GPU_EnsureOnGPU(pSource);
-   VIDEO_GPU_EnsureOnGPU(pTarget);
+   if (!VIDEO_GPU_IsScreenSized(pTarget))
+   {
+      return VIDEO_GPU_WrongSize();
+   }
+
    VIDEO_GPU_FlushBatch();
    VIDEO_GPU_CopyToScratch(pTarget, NULL);
 
@@ -1656,15 +1737,9 @@ VIDEO_GPU_SwitchStep(
 
    if (pSource == NULL || pTarget == NULL)
    {
-      if (pSource != NULL)
-      {
-         VIDEO_GPU_PrepareCPUAccess(pFrom);
-      }
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      return VIDEO_GPU_NotOnGPU();
    }
 
-   VIDEO_GPU_EnsureOnGPU(pSource);
-   VIDEO_GPU_EnsureOnGPU(pTarget);
    VIDEO_GPU_FlushBatch();
 
    SDL_zero(params);
@@ -1686,12 +1761,16 @@ VIDEO_GPU_ReplaceIndex(
    GPUSURFACE  *pTarget = VIDEO_GPU_FindSurface(pSurface);
    EFFECTPARAMS params;
 
-   if (pTarget == NULL || !VIDEO_GPU_IsScreenSized(pTarget))
+   if (pTarget == NULL)
    {
-      return VIDEO_GPU_FallBackToCPU(pTarget);
+      return VIDEO_GPU_NotOnGPU();
    }
 
-   VIDEO_GPU_EnsureOnGPU(pTarget);
+   if (!VIDEO_GPU_IsScreenSized(pTarget))
+   {
+      return VIDEO_GPU_WrongSize();
+   }
+
    VIDEO_GPU_FlushBatch();
    VIDEO_GPU_CopyToScratch(pTarget, NULL);
 
@@ -2002,25 +2081,15 @@ VIDEO_GPU_WriteScreen(
    SDL_Rect    area, written;
    SDL_Point   position;
 
-   if (!VIDEO_GPU_ClipCopy(pSource->w, pSource->h, pSourceRect, SCREEN_WIDTH, SCREEN_HEIGHT, pDestRect, &area, &position))
+   if (pEntry == NULL ||
+       !VIDEO_GPU_ClipCopy(pSource->w, pSource->h, pSourceRect, SCREEN_WIDTH, SCREEN_HEIGHT, pDestRect, &area, &position))
    {
       return;
    }
 
    VIDEO_GPU_FlushBatch();
 
-   if (pEntry != NULL)
-   {
-      VIDEO_GPU_EnsureOnGPU(pEntry);
-      VIDEO_GPU_CopyRegion(pEntry->pTexture, &area, gGPU.pIndexTexture, &position);
-   }
-   else
-   {
-      //
-      // It stayed on the CPU, so its pixels are current.
-      //
-      VIDEO_GPU_UploadPixels(pSource, &area, gGPU.pIndexTexture, &position);
-   }
+   VIDEO_GPU_CopyRegion(pEntry->pTexture, &area, gGPU.pIndexTexture, &position);
 
    if (gGPU.fVerify)
    {
@@ -2991,6 +3060,7 @@ VIDEO_GPU_Init(
    gGPU.pAtlasEntries = (ATLASENTRY *)SDL_calloc(ATLAS_SLOTS, sizeof(ATLASENTRY));
    gGPU.pExpectedIndex = (BYTE *)SDL_calloc(SCREEN_PIXELS, 1);
    gGPU.pExpectedBlack = (BYTE *)SDL_calloc(SCREEN_PIXELS, 1);
+   gGPU.iShelfY = SCREEN_HEIGHT;
 
    if (gGPU.pSpritePipeline == NULL || gGPU.pEffectPipeline == NULL || gGPU.pPalettePipeline == NULL ||
        gGPU.pNearestSampler == NULL || gGPU.pLinearSampler == NULL || gGPU.pAtlas == NULL ||
