@@ -56,6 +56,7 @@
     IBOutlet UISwitch *toggleKeepAspect;
     IBOutlet UISwitch *toggleSmoothScaling;
     
+    IBOutlet UISwitch *toggleGPU;
     IBOutlet UISwitch *toggleGLSL;
     IBOutlet UISwitch *toggleHDR;
     IBOutlet UILabel *lblShader;
@@ -267,7 +268,7 @@ typedef void(^SelectedBlock)(NSString *selected);
             rows = 2;
             break;
         case 2:
-            rows = 4;
+            rows = 5;
             break;
         case 3:
             rows = [toggleGLSL isOn] ? 3 : 1;
@@ -413,6 +414,7 @@ typedef void(^SelectedBlock)(NSString *selected);
     
     toggleStereo.on         = gConfig.iAudioChannels == 2;
     toggleSurroundOPL.on    = gConfig.fUseSurroundOPL;
+    toggleGPU.on            = gConfig.fEnableGPU;
     toggleGLSL.on           = gConfig.fEnableGLSL;
     toggleHDR.on            = gConfig.fEnableHDR;
     
@@ -460,6 +462,7 @@ typedef void(^SelectedBlock)(NSString *selected);
         gConfig.pszScaleQuality = strdup(toggleSmoothScaling.on ? "1" : PAL_GetConfigString(PALCFG_SCALEQUALITY, YES));
     }
     
+    gConfig.fEnableGPU = toggleGPU.isOn;
     gConfig.fEnableGLSL = toggleGLSL.isOn;
     gConfig.fEnableHDR = toggleHDR.isOn;
     gConfig.pszShader = [lblShader.text length] == 0 ? NULL :strdup([lblShader.text UTF8String]);
