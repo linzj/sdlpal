@@ -32,7 +32,11 @@ vec3 Fetch(vec2 pos, vec2 off)
     {
         return vec3(0.0);
     }
-    return ToLinear(texture(u_image, pos.xy, -16.0).rgb);
+
+    // These positions often fall exactly between two texels, and GPUs disagree about which
+    // one that picks. A small nudge makes them all agree. Of the directions tried, this one
+    // stays closest to the OpenGL version.
+    return ToLinear(texture(u_image, pos.xy - 0.02 / vec2(textureSize(u_image, 0)), -16.0).rgb);
 }
 
 // Distance in emulated pixels to nearest texel.

@@ -20,15 +20,20 @@ void main()
     float dx = 1.0 / u_inputSize.x / 2.0;
     float dy = 1.0 / u_inputSize.y / 2.0;
 
-    vec3 c00 = texture(u_image, v_texCoord + vec2(-dx, -dy)).xyz;
-    vec3 c10 = texture(u_image, v_texCoord + vec2(  0, -dy)).xyz;
-    vec3 c20 = texture(u_image, v_texCoord + vec2( dx, -dy)).xyz;
-    vec3 c01 = texture(u_image, v_texCoord + vec2(-dx,   0)).xyz;
-    vec3 c11 = texture(u_image, v_texCoord).xyz;
-    vec3 c21 = texture(u_image, v_texCoord + vec2( dx,   0)).xyz;
-    vec3 c02 = texture(u_image, v_texCoord + vec2(-dx,  dy)).xyz;
-    vec3 c12 = texture(u_image, v_texCoord + vec2(  0,  dy)).xyz;
-    vec3 c22 = texture(u_image, v_texCoord + vec2( dx,  dy)).xyz;
+    // At some window sizes these positions fall exactly between two texels, and GPUs disagree
+    // about which one that picks. A small nudge makes them all agree. Of the directions tried,
+    // this one stays closest to the OpenGL version.
+    vec2 uv = v_texCoord + 0.02 / vec2(textureSize(u_image, 0));
+
+    vec3 c00 = texture(u_image, uv + vec2(-dx, -dy)).xyz;
+    vec3 c10 = texture(u_image, uv + vec2(  0, -dy)).xyz;
+    vec3 c20 = texture(u_image, uv + vec2( dx, -dy)).xyz;
+    vec3 c01 = texture(u_image, uv + vec2(-dx,   0)).xyz;
+    vec3 c11 = texture(u_image, uv).xyz;
+    vec3 c21 = texture(u_image, uv + vec2( dx,   0)).xyz;
+    vec3 c02 = texture(u_image, uv + vec2(-dx,  dy)).xyz;
+    vec3 c12 = texture(u_image, uv + vec2(  0,  dy)).xyz;
+    vec3 c22 = texture(u_image, uv + vec2( dx,  dy)).xyz;
 
     vec3 dt = vec3(1.0);
     float d1 = dot(abs(c00 - c22), dt) + 0.001;
