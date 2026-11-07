@@ -162,11 +162,31 @@ TEST_F(TrainerScript, TeleporterWithinAScene) {
     EXPECT_EQ(75 * 16 + 8, info.yMove);
 }
 
-TEST_F(TrainerScript, RaftCarriesTheParty) {
+TEST_F(TrainerScript, RaftCarriesThePartyToTheLastPlace) {
     line(1, 0x0044, 40, 50, 0);      // ride to the other side
-    line(2, 0x0001);
+    line(2, 0x0044, 41, 52, 0);
+    line(3, 0x007A, 42, 53, 1);      // and step off
+    line(4, 0x0001);
+    line(5, 0x0044, 1, 1, 0);        // the way back is for the next time
 
-    EXPECT_NE(0, analyze(1).wFlags & kTrainerScriptCarry);
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptCarry);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptCarryTo);
+    EXPECT_EQ(42 * 32 + 16, info.xCarry);
+    EXPECT_EQ(53 * 16 + 8, info.yCarry);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptRide);
+    EXPECT_EQ(41 * 32, info.xRide);
+    EXPECT_EQ(52 * 16, info.yRide);
+}
+
+TEST_F(TrainerScript, StepFromWhereverThePartyIsEndsSomewhereUnknown) {
+    line(1, 0x007A, 42, 53, 1);
+    line(2, 0x006E, 16, 8, 0);
+    line(3, 0x0000);
+
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptCarry);
+    EXPECT_EQ(0, info.wFlags & kTrainerScriptCarryTo);
 }
 
 TEST_F(TrainerScript, FollowsConditionalJumps) {
