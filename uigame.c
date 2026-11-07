@@ -549,6 +549,9 @@ PAL_SystemMenu(
       { 5,      SYSMENU_LABEL_QUIT,          TRUE,     PAL_XY(53, 72 + 72) },
 #if !defined(PAL_CLASSIC)
       { 6,      SYSMENU_LABEL_BATTLEMODE,    TRUE,     PAL_XY(53, 72 + 90) },
+      { 7,      SYSMENU_LABEL_TRAINER,       TRUE,     PAL_XY(53, 72 + 108) },
+#else
+      { 7,      SYSMENU_LABEL_TRAINER,       TRUE,     PAL_XY(53, 72 + 90) },
 #endif
    };
    const int           nSystemMenuItem = sizeof(rgSystemMenuItem) / sizeof(MENUITEM);
@@ -644,6 +647,13 @@ PAL_SystemMenu(
       PAL_BattleSpeedMenu();
       break;
 #endif
+
+   case 7:
+      //
+      // Trainer, for those who have no T key to press
+      //
+      TRAINER_Menu();
+      break;
    }
 
    PAL_DeleteBox(lpMenuBox);

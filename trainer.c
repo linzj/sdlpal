@@ -17,7 +17,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
-// The in-game trainer, opened with the T key while walking around a scene:
+// The in-game trainer, opened with the T key while walking around a scene, or from the
+// system menu of the game:
 //
 //  - Walking: goes to one treasure or exit of the current scene, or collects every treasure,
 //    or goes through as many scenes as it takes to the deepest place of a dungeon.
