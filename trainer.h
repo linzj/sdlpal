@@ -35,6 +35,8 @@ typedef enum tagTRAINERSCRIPTFLAG
    kTrainerScriptOther   = (1 << 5),   // does something a plain pick-up never does
    kTrainerScriptMove    = (1 << 6),   // puts the party at a position
    kTrainerScriptCarry   = (1 << 7),   // walks or carries the party somewhere
+   kTrainerScriptCarryTo = (1 << 8),   // and it is known where that ends
+   kTrainerScriptRide    = (1 << 9),   // the event itself moves along with the party
 } TRAINERSCRIPTFLAG;
 
 typedef struct tagTRAINERSCRIPTINFO
@@ -46,6 +48,8 @@ typedef struct tagTRAINERSCRIPTINFO
    WORD          wScene;               // the first scene it changes to
    WORD          nLoot;                // how many items and amounts of money it gives
    WORD          xMove, yMove;         // the first position it puts the party at
+   WORD          xCarry, yCarry;       // the position it walks or carries the party to
+   WORD          xRide, yRide;         // the position the event itself ends up at
 } TRAINERSCRIPTINFO, *LPTRAINERSCRIPTINFO;
 
 PAL_C_LINKAGE_BEGIN
