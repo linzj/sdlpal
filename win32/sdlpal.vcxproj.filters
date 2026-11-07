@@ -153,6 +153,9 @@
     <ClCompile Include="..\text.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\trainer.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="..\ui.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -326,6 +329,9 @@
     </ClCompile>
     <ClCompile Include="..\tests\test_main.cpp">
       <Filter>Test Files\deps</Filter>
+    </ClCompile>
+    <ClCompile Include="..\tests\test_trainer.cpp">
+      <Filter>Test Files</Filter>
     </ClCompile>
     <ClCompile Include="..\tests\test_swprintf.cpp">
       <Filter>Test Files</Filter>
@@ -891,6 +897,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\text.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\trainer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\ui.h">

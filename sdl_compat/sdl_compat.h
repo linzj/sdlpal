@@ -110,6 +110,8 @@ extern void SDL_PauseAudio(bool);
 #define SDLK_z SDLK_Z
 #undef SDLK_x
 #define SDLK_x SDLK_X
+#undef SDLK_t
+#define SDLK_t SDLK_T
 
 #undef KMOD_ALT
 #define KMOD_ALT SDL_KMOD_ALT

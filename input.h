@@ -58,6 +58,7 @@ enum PALKEY
    kKeyForce       = (1 << 15),
    kKeyHome        = (1 << 16),
    kKeyEnd         = (1 << 17),
+   kKeyTrainer     = (1 << 18),
 };
 
 PAL_C_LINKAGE_BEGIN

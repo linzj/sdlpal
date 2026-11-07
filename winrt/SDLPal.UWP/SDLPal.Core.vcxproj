@@ -486,6 +486,7 @@
     <ClInclude Include="..\..\ui.h" />
     <ClInclude Include="..\..\uibattle.h" />
     <ClInclude Include="..\..\uigame.h" />
+    <ClInclude Include="..\..\trainer.h" />
     <ClInclude Include="..\..\util.h" />
     <ClInclude Include="..\..\video.h" />
     <ClInclude Include="..\pal_config.h" />
@@ -726,6 +727,7 @@
     <ClCompile Include="..\..\ui.c" />
     <ClCompile Include="..\..\uibattle.c" />
     <ClCompile Include="..\..\uigame.c" />
+    <ClCompile Include="..\..\trainer.c" />
     <ClCompile Include="..\..\util.c" />
     <ClCompile Include="..\..\video.c" />
     <ClCompile Include="..\..\yj1.c" />

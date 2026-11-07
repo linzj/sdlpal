@@ -904,6 +904,7 @@ PAL_ReloadInNextTick(
 
 --*/
 {
+    TRAINER_Stop();
     gpGlobals->bCurrentSaveSlot = (BYTE)iSaveSlot;
     PAL_SetLoadFlags(kLoadGlobalData | kLoadScene | kLoadPlayerSprite);
     gpGlobals->fEnteringScene = TRUE;
