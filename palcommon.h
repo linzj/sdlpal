@@ -81,7 +81,7 @@ typedef struct tagTRIGGERRANGE { PAL_POS rgPos[13]; } TRIGGERRANGE;
 // maximum number of level
 #define     MAX_LEVELS                   99
 
-#define     MINIMAL_WORD_COUNT           (MAX_OBJECTS + 13)
+#define     MINIMAL_WORD_COUNT           (MAX_OBJECTS + 14)
 
 #define PAL_CDTRACK_BASE    10000
 

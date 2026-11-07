@@ -52,6 +52,9 @@ static LPWSTR gc_rgszAdditionalWords[CP_MAX][ATB_WORD_COUNT] = {
 static LPWSTR gc_rgszDefaultAdditionalWords[ATB_WORD_COUNT] = { NULL, L"\xFF11", L"\xFF12", L"\xFF13", L"\xFF14", L"\xFF15" };
 #endif
 
+// The label of the trainer in the system menu, which is written the same in both.
+static const WCHAR gc_szTrainerWord[] = L"\x4FEE\x6539\x5668";
+
 #define SDLPAL_EXTRA_WORD_COUNT     1
 static LPWSTR gc_rgszSDLPalWords[CP_MAX][SDLPAL_EXTRA_WORD_COUNT] = {
 	{ L"\x8FD4\x56DE\x8A2D\x5B9A" },
@@ -633,6 +636,14 @@ PAL_ReadMessageFile(
 			g_TextLib.lpWordBuf[witem->index] = witem->value;
 			free(witem); witem = temp;
 		}
+		//
+		// A message file does not know about the trainer. These words all get freed in the end.
+		//
+		if (!g_TextLib.lpWordBuf[SYSMENU_LABEL_TRAINER])
+		{
+			g_TextLib.lpWordBuf[SYSMENU_LABEL_TRAINER] = (LPWSTR)UTIL_calloc(sizeof(gc_szTrainerWord) / sizeof(WCHAR), sizeof(WCHAR));
+			wcscpy(g_TextLib.lpWordBuf[SYSMENU_LABEL_TRAINER], gc_szTrainerWord);
+		}
 #ifndef PAL_CLASSIC
 		for (i = 1; i < ATB_WORD_COUNT; i++)
 			if (!g_TextLib.lpWordBuf[i + SYSMENU_LABEL_BATTLEMODE])
@@ -870,6 +881,7 @@ PAL_InitText(
 	   g_TextLib.lpIndexBuf = NULL;
 
 	   memcpy(g_TextLib.lpWordBuf + SYSMENU_LABEL_LAUNCHSETTING, gc_rgszSDLPalWords[PAL_GetCodePage()], SDLPAL_EXTRA_WORD_COUNT * sizeof(LPCWSTR));
+	   g_TextLib.lpWordBuf[SYSMENU_LABEL_TRAINER] = (LPWSTR)gc_szTrainerWord;
 
 #ifndef PAL_CLASSIC
 	   memcpy(g_TextLib.lpWordBuf + SYSMENU_LABEL_BATTLEMODE, gc_rgszAdditionalWords[PAL_GetCodePage()], ATB_WORD_COUNT * sizeof(LPCWSTR));
