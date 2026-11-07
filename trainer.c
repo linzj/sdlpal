@@ -26,9 +26,11 @@
 //  - Puzzles: goes to whatever in the scene an item in the inventory is meant to be used on,
 //    and uses it, the way the hammer breaks the statues around the lake.
 //  - Monsters: walks up to the monsters of the scene and fights them by itself, to level up.
-//  - Battles: turns on the game's own auto battle for all of them.
+//  - Battles: fights by itself whenever one of the above is going on, and turns on the
+//    game's own auto battle for all battles if asked to.
 //  - Levels: keeps everyone in the party at a chosen level, including whoever joins later.
-//  - Items and magics: adds any item to the inventory, or teaches or removes any magic.
+//  - Money, items and magics: sets the amount of money, adds any item to the inventory,
+//    or teaches or removes any magic.
 //
 // The game has no list of treasures. Which events are treasures is worked out by reading
 // their trigger scripts: see TRAINER_AnalyzeScript() and TRAINER_IsTreasure().
@@ -75,7 +77,8 @@
 #define TOAST_FRAMES            30
 #define HUNT_IDLE_FRAMES        600 // give up when no battle has come out of this much walking
 
-#define LIST_ROWS               8
+#define LIST_ROWS               8   // and one more if there is no text below the list
+#define MAX_CASH                999999   // the game shows six digits of it
 #define LIST_X                  15
 #define LIST_Y                  12
 #define LIST_LINE_HEIGHT        18
@@ -1837,7 +1840,7 @@ TRAINER_EndJob(
 
 --*/
 {
-   if (g_Walk.job == kTrainerJobHunt && !g_fAutoBattle)
+   if (g_Walk.job != kTrainerJobNone && !g_fAutoBattle)
    {
       gpGlobals->fAutoBattle = FALSE;
    }
@@ -1903,6 +1906,8 @@ TRAINER_StartJob(
    g_Walk.dirStep = kDirUnknown;
    g_Walk.posLast = PAL_XY(-1, -1);
    g_Walk.nStepsLeft = -1;
+
+   TRAINER_ApplyAutoBattle();
 }
 
 static BOOL
@@ -2704,8 +2709,10 @@ TRAINER_ApplyAutoBattle(
 /*++
   Purpose:
 
-    Turn on auto battle if the trainer wants it. The game turns it off after each battle,
-    and touching two monsters at once means another battle right after that one.
+    Turn on auto battle if the trainer wants it: when it is switched on, and whenever the
+    trainer is doing something by itself, as nobody may be there to fight the battles that
+    come up. The game turns it off after each battle, and touching two monsters at once
+    means another battle right after that one.
 
   Parameters:
 
@@ -2717,7 +2724,7 @@ TRAINER_ApplyAutoBattle(
 
 --*/
 {
-   if (g_fAutoBattle || g_Walk.job == kTrainerJobHunt)
+   if (g_fAutoBattle || g_Walk.job != kTrainerJobNone)
    {
       gpGlobals->fAutoBattle = TRUE;
    }
@@ -2997,6 +3004,7 @@ TRAINER_ListMenu(
 --*/
 {
    const int   iColumnWidth = LIST_WIDTH / nColumns;
+   const int   nRows = (lpfnFooter != NULL) ? LIST_ROWS : LIST_ROWS + 1;
    DWORD       dwTime = SDL_GetTicks();
    int         iRow, iColumn;
 
@@ -3004,8 +3012,8 @@ TRAINER_ListMenu(
 
    while (TRUE)
    {
-      int         iFirst = (*piCursor / nColumns - LIST_ROWS / 2) * nColumns;
-      const int   iLastPage = ((nItems + nColumns - 1) / nColumns - LIST_ROWS) * nColumns;
+      int         iFirst = (*piCursor / nColumns - nRows / 2) * nColumns;
+      const int   iLastPage = ((nItems + nColumns - 1) / nColumns - nRows) * nColumns;
 
       if (iFirst > iLastPage)
       {
@@ -3020,7 +3028,7 @@ TRAINER_ListMenu(
       PAL_CreateBoxWithShadow(PAL_XY(2, 0), LIST_ROWS + 1, 17, 1, FALSE, 0);
       PAL_DrawText(lpszTitle, PAL_XY(LIST_X, LIST_Y), MENUITEM_COLOR_CONFIRMED, TRUE, FALSE, FALSE);
 
-      for (iRow = 0; iRow < LIST_ROWS; iRow++)
+      for (iRow = 0; iRow < nRows; iRow++)
       {
          for (iColumn = 0; iColumn < nColumns; iColumn++)
          {
@@ -3076,8 +3084,8 @@ TRAINER_ListMenu(
          else if (g_InputState.dwKeyPress & kKeyDown) iNew += nColumns;
          else if (g_InputState.dwKeyPress & kKeyLeft) iNew -= 1;
          else if (g_InputState.dwKeyPress & kKeyRight) iNew += 1;
-         else if (g_InputState.dwKeyPress & kKeyPgUp) iNew -= LIST_ROWS * nColumns;
-         else if (g_InputState.dwKeyPress & kKeyPgDn) iNew += LIST_ROWS * nColumns;
+         else if (g_InputState.dwKeyPress & kKeyPgUp) iNew -= nRows * nColumns;
+         else if (g_InputState.dwKeyPress & kKeyPgDn) iNew += nRows * nColumns;
          else if (g_InputState.dwKeyPress & kKeyHome) iNew = 0;
          else if (g_InputState.dwKeyPress & kKeyEnd)  iNew = nItems - 1;
 
@@ -3087,12 +3095,15 @@ TRAINER_ListMenu(
 }
 
 static INT
-TRAINER_ReadNumber(
+TRAINER_ReadNumberInSteps(
    LPCWSTR        lpszTitle,
    INT            iValue,
    INT            iMin,
    INT            iMax,
-   LPCWSTR        lpszZero
+   LPCWSTR        lpszZero,
+   INT            iStep,
+   INT            iBigStep,
+   LPCWSTR        lpszHint
 )
 /*++
   Purpose:
@@ -3110,6 +3121,12 @@ TRAINER_ReadNumber(
     [IN]  iMax - the highest number.
 
     [IN]  lpszZero - what to show instead of zero. May be NULL.
+
+    [IN]  iStep - how much the up and down keys change the number.
+
+    [IN]  iBigStep - how much the left and right keys change the number.
+
+    [IN]  lpszHint - what to tell about those keys.
 
   Return value:
 
@@ -3138,7 +3155,7 @@ TRAINER_ReadNumber(
          PAL_DrawText(szValue, PAL_XY(60, 88), MENUITEM_COLOR_SELECTED, TRUE, FALSE, FALSE);
       }
 
-      PAL_DrawText(TR("上下調整 左右加減十", "上下调整 左右加减十"), PAL_XY(60, 108), DESCTEXT_COLOR, TRUE, FALSE, FALSE);
+      PAL_DrawText(lpszHint, PAL_XY(60, 108), DESCTEXT_COLOR, TRUE, FALSE, FALSE);
 
       VIDEO_UpdateScreen(NULL);
 
@@ -3154,13 +3171,26 @@ TRAINER_ReadNumber(
          PAL_ClearKeyState();
          return iValue;
       }
-      else if (g_InputState.dwKeyPress & kKeyUp)    iValue += 1;
-      else if (g_InputState.dwKeyPress & kKeyDown)  iValue -= 1;
-      else if (g_InputState.dwKeyPress & kKeyRight) iValue += 10;
-      else if (g_InputState.dwKeyPress & kKeyLeft)  iValue -= 10;
+      else if (g_InputState.dwKeyPress & kKeyUp)    iValue += iStep;
+      else if (g_InputState.dwKeyPress & kKeyDown)  iValue -= iStep;
+      else if (g_InputState.dwKeyPress & kKeyRight) iValue += iBigStep;
+      else if (g_InputState.dwKeyPress & kKeyLeft)  iValue -= iBigStep;
 
       iValue = (iValue < iMin) ? iMin : ((iValue > iMax) ? iMax : iValue);
    }
+}
+
+static INT
+TRAINER_ReadNumber(
+   LPCWSTR        lpszTitle,
+   INT            iValue,
+   INT            iMin,
+   INT            iMax,
+   LPCWSTR        lpszZero
+)
+{
+   return TRAINER_ReadNumberInSteps(lpszTitle, iValue, iMin, iMax, lpszZero, 1, 10,
+      TR("上下調整 左右加減十", "上下调整 左右加减十"));
 }
 
 static LPCWSTR
@@ -3527,7 +3557,6 @@ TRAINER_HuntMenu(
 
    TRAINER_StartJob(kTrainerJobHunt, 0);
    g_Walk.wHuntLevel = (WORD)iValue;
-   TRAINER_ApplyAutoBattle();
    return TRUE;
 }
 
@@ -3581,6 +3610,35 @@ TRAINER_LevelMenu(
    }
 
    return TRUE;
+}
+
+static VOID
+TRAINER_MoneyMenu(
+   VOID
+)
+/*++
+  Purpose:
+
+    Let the player set the amount of money.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   const INT iValue = TRAINER_ReadNumberInSteps(TR("修改金錢", "修改金钱"),
+      (gpGlobals->dwCash > MAX_CASH) ? MAX_CASH : (INT)gpGlobals->dwCash, 0, MAX_CASH, NULL, 1000, 100000,
+      TR("上下加減千 左右加減十萬", "上下加减千 左右加减十万"));
+
+   if (iValue >= 0)
+   {
+      gpGlobals->dwCash = (DWORD)iValue;
+   }
 }
 
 static VOID
@@ -3819,6 +3877,10 @@ TRAINER_MainLabel(
       return g_szLabel;
 
    case 6:
+      PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("修改金錢：%d", "修改金钱：%d"), (INT)gpGlobals->dwCash);
+      return g_szLabel;
+
+   case 7:
       return TR("獲得物品", "获得物品");
 
    default:
@@ -3850,7 +3912,7 @@ TRAINER_Menu(
 
    while (!fClose)
    {
-      switch (TRAINER_ListMenu(L"修改器", 8, 1, &iCursor, TRAINER_MainLabel, NULL))
+      switch (TRAINER_ListMenu(L"修改器", 9, 1, &iCursor, TRAINER_MainLabel, NULL))
       {
       case 0:
          fClose = TRAINER_TreasureMenu();
@@ -3879,10 +3941,14 @@ TRAINER_Menu(
          break;
 
       case 6:
-         TRAINER_ItemMenu();
+         TRAINER_MoneyMenu();
          break;
 
       case 7:
+         TRAINER_ItemMenu();
+         break;
+
+      case 8:
          TRAINER_MagicMenu();
          break;
 
