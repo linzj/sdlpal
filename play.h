@@ -46,6 +46,18 @@ PAL_GetSearchTriggerRange(
    VOID
 );
 
+TRIGGERRANGE
+PAL_GetSearchTriggerRangeAt(
+   INT       x,
+   INT       y,
+   WORD      wDirection
+);
+
+VOID
+PAL_TriggerSearchEvent(
+   WORD      wEventObjectID
+);
+
 VOID
 PAL_Search(
    VOID

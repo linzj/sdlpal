@@ -3332,6 +3332,7 @@ PAL_RunTriggerScript(
             wScriptEntry++;
          }
          gpGlobals->fAutoBattle = FALSE;
+         TRAINER_ApplyAutoBattle();
          break;
 
       case 0x0008:

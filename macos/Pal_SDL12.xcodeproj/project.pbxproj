@@ -77,6 +77,7 @@
 		7111D6271F2D6348009312F0 /* uibattle.c in Sources */ = {isa = PBXBuildFile; fileRef = 7111D5E11F2D6348009312F0 /* uibattle.c */; };
 		7111D6281F2D6348009312F0 /* uibattle.h in Copy Frameworks into .app bundle */ = {isa = PBXBuildFile; fileRef = 7111D5E21F2D6348009312F0 /* uibattle.h */; };
 		7111D6291F2D6348009312F0 /* uigame.c in Sources */ = {isa = PBXBuildFile; fileRef = 7111D5E31F2D6348009312F0 /* uigame.c */; };
+		7111D7001F2D6348009312F0 /* trainer.c in Sources */ = {isa = PBXBuildFile; fileRef = 7111D7011F2D6348009312F0 /* trainer.c */; };
 		7111D62A1F2D6348009312F0 /* uigame.h in Copy Frameworks into .app bundle */ = {isa = PBXBuildFile; fileRef = 7111D5E41F2D6348009312F0 /* uigame.h */; };
 		7111D62B1F2D6348009312F0 /* util.c in Sources */ = {isa = PBXBuildFile; fileRef = 7111D5E51F2D6348009312F0 /* util.c */; };
 		7111D62C1F2D6348009312F0 /* util.h in Copy Frameworks into .app bundle */ = {isa = PBXBuildFile; fileRef = 7111D5E61F2D6348009312F0 /* util.h */; };
@@ -297,6 +298,8 @@
 		7111D5E21F2D6348009312F0 /* uibattle.h */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.h; name = uibattle.h; path = ../uibattle.h; sourceTree = SOURCE_ROOT; };
 		7111D5E31F2D6348009312F0 /* uigame.c */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.c; name = uigame.c; path = ../uigame.c; sourceTree = SOURCE_ROOT; };
 		7111D5E41F2D6348009312F0 /* uigame.h */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.h; name = uigame.h; path = ../uigame.h; sourceTree = SOURCE_ROOT; };
+		7111D7011F2D6348009312F0 /* trainer.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; name = trainer.c; path = ../trainer.c; sourceTree = SOURCE_ROOT; };
+		7111D7021F2D6348009312F0 /* trainer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = trainer.h; path = ../trainer.h; sourceTree = SOURCE_ROOT; };
 		7111D5E51F2D6348009312F0 /* util.c */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.c; name = util.c; path = ../util.c; sourceTree = SOURCE_ROOT; };
 		7111D5E61F2D6348009312F0 /* util.h */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.h; name = util.h; path = ../util.h; sourceTree = SOURCE_ROOT; };
 		7111D5E71F2D6348009312F0 /* video.c */ = {isa = PBXFileReference; fileEncoding = 30; lastKnownFileType = sourcecode.c.c; name = video.c; path = ../video.c; sourceTree = SOURCE_ROOT; };
@@ -524,6 +527,8 @@
 				7111D5E21F2D6348009312F0 /* uibattle.h */,
 				7111D5E31F2D6348009312F0 /* uigame.c */,
 				7111D5E41F2D6348009312F0 /* uigame.h */,
+				7111D7011F2D6348009312F0 /* trainer.c */,
+				7111D7021F2D6348009312F0 /* trainer.h */,
 				7111D5E51F2D6348009312F0 /* util.c */,
 				7111D5E61F2D6348009312F0 /* util.h */,
 				7111D5E71F2D6348009312F0 /* video.c */,
@@ -777,6 +782,7 @@
 				7111D6251F2D6348009312F0 /* ui.c in Sources */,
 				7111D6271F2D6348009312F0 /* uibattle.c in Sources */,
 				7111D6291F2D6348009312F0 /* uigame.c in Sources */,
+				7111D7001F2D6348009312F0 /* trainer.c in Sources */,
 				7111D62B1F2D6348009312F0 /* util.c in Sources */,
 				7111D62D1F2D6348009312F0 /* video.c in Sources */,
 				7111D62F1F2D6348009312F0 /* yj1.c in Sources */,

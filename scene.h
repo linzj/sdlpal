@@ -23,6 +23,7 @@
 #define	_SCENE_H
 
 #include "common.h"
+#include "map.h"
 
 PAL_C_LINKAGE_BEGIN
 
@@ -42,6 +43,13 @@ PAL_CheckObstacleWithRange(
 	BOOL            fCheckEventObjects,
 	WORD            wSelfObject,
 	BOOL			fCheckRange
+);
+
+BOOL
+PAL_MapPosIsBlocked(
+    PAL_POS         pos,
+    BOOL            fCheckRange,
+    LPCPALMAP       lpMap
 );
 
 BOOL

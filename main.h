@@ -53,6 +53,7 @@
 #include "game.h"
 #include "midi.h"
 #include "aviplay.h"
+#include "trainer.h"
 
 VOID
 PAL_Shutdown(

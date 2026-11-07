@@ -836,6 +836,8 @@ PAL_BattleUIUpdate(
       }
    }
 
+   TRAINER_CheckBattleInput();
+
    if (gpGlobals->fAutoBattle)
    {
       PAL_BattlePlayerCheckReady();

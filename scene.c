@@ -515,41 +515,27 @@ PAL_MakeScene(
 }
 
 BOOL
-PAL_CheckObstacle(
+PAL_MapPosIsBlocked(
     PAL_POS         pos,
-    BOOL            fCheckEventObjects,
-    WORD            wSelfObject
-)
-{
-    return PAL_CheckObstacleWithRange(pos, fCheckEventObjects, wSelfObject, FALSE);
-}
-
-BOOL
-PAL_CheckObstacleWithRange(
-    PAL_POS         pos,
-    BOOL            fCheckEventObjects,
-    WORD            wSelfObject,
-    BOOL			fCheckRange
+    BOOL            fCheckRange,
+    LPCPALMAP       lpMap
 )
 /*++
    Purpose:
 
-     Check if the specified location has obstacle or not.
+     Check if the party cannot stand at a position because of the tiles of a map.
 
    Parameters:
 
      [IN]  pos - the position to check.
 
-     [IN]  fCheckEventObjects - TRUE if check for event objects, FALSE if only
-           check for the map.
-
-     [IN]  wSelfObject - the event object which will be skipped.
-
      [IN]  fCheckRange - whether need to check range.
+
+     [IN]  lpMap - the map.
 
    Return value:
 
-     TRUE if the location is obstacle, FALSE if not.
+     TRUE if the location is blocked, FALSE if not.
 
 --*/
 {
@@ -596,7 +582,49 @@ PAL_CheckObstacleWithRange(
       }
    }
 
-   if (PAL_MapTileIsBlocked(x, y, h, PAL_GetCurrentMap()))
+   return PAL_MapTileIsBlocked(x, y, h, lpMap);
+}
+
+BOOL
+PAL_CheckObstacle(
+    PAL_POS         pos,
+    BOOL            fCheckEventObjects,
+    WORD            wSelfObject
+)
+{
+    return PAL_CheckObstacleWithRange(pos, fCheckEventObjects, wSelfObject, FALSE);
+}
+
+BOOL
+PAL_CheckObstacleWithRange(
+    PAL_POS         pos,
+    BOOL            fCheckEventObjects,
+    WORD            wSelfObject,
+    BOOL			fCheckRange
+)
+/*++
+   Purpose:
+
+     Check if the specified location has obstacle or not.
+
+   Parameters:
+
+     [IN]  pos - the position to check.
+
+     [IN]  fCheckEventObjects - TRUE if check for event objects, FALSE if only
+           check for the map.
+
+     [IN]  wSelfObject - the event object which will be skipped.
+
+     [IN]  fCheckRange - whether need to check range.
+
+   Return value:
+
+     TRUE if the location is obstacle, FALSE if not.
+
+--*/
+{
+   if (PAL_MapPosIsBlocked(pos, fCheckRange, PAL_GetCurrentMap()))
    {
       return TRUE;
    }
@@ -801,14 +829,15 @@ PAL_UpdateParty(
 --*/
 {
    int              xSource, ySource, xTarget, yTarget, xOffset, yOffset, i;
+   PALDIRECTION     dir = TRAINER_GetDirection();
 
    //
-   // Has user pressed one of the arrow keys?
+   // Has user pressed one of the arrow keys, or is the trainer walking?
    //
-   if (g_InputState.dir != kDirUnknown)
+   if (dir != kDirUnknown)
    {
-      xOffset = ((g_InputState.dir == kDirWest || g_InputState.dir == kDirSouth) ? -16 : 16);
-      yOffset = ((g_InputState.dir == kDirWest || g_InputState.dir == kDirNorth) ? -8 : 8);
+      xOffset = ((dir == kDirWest || dir == kDirSouth) ? -16 : 16);
+      yOffset = ((dir == kDirWest || dir == kDirNorth) ? -8 : 8);
 
       xSource = PAL_X(gpGlobals->viewport) + PAL_X(gpGlobals->partyoffset);
       ySource = PAL_Y(gpGlobals->viewport) + PAL_Y(gpGlobals->partyoffset);
@@ -816,7 +845,7 @@ PAL_UpdateParty(
       xTarget = xSource + xOffset;
       yTarget = ySource + yOffset;
 
-      gpGlobals->wPartyDirection = g_InputState.dir;
+      gpGlobals->wPartyDirection = dir;
 
       //
       // Check for obstacles on the destination location
@@ -831,7 +860,7 @@ PAL_UpdateParty(
             gpGlobals->rgTrail[i + 1] = gpGlobals->rgTrail[i];
          }
 
-         gpGlobals->rgTrail[0].wDirection = g_InputState.dir;
+         gpGlobals->rgTrail[0].wDirection = dir;
          gpGlobals->rgTrail[0].x = xSource;
          gpGlobals->rgTrail[0].y = ySource;
 

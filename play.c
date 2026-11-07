@@ -359,35 +359,34 @@ PAL_GameEquipItem(
 }
 
 TRIGGERRANGE
-PAL_GetSearchTriggerRange(
-   VOID
+PAL_GetSearchTriggerRangeAt(
+   INT       x,
+   INT       y,
+   WORD      wDirection
 )
 /*++
   Purpose:
 
-    Calculate 13 checkpoint coordinates for manual event search.
+    Calculate 13 checkpoint coordinates for manual event search from a position.
 
   Parameters:
 
-    None.
+    [IN]  x - the X coordinate on the map.
+
+    [IN]  y - the Y coordinate on the map.
+
+    [IN]  wDirection - where the party is facing.
 
   Return value:
 
-    None.
+    The checkpoints, in the order they are searched.
 
 --*/
 {
-   int                x, y, xOffset, yOffset, i;
-   LPEVENTOBJECT      p;
+   int                xOffset, yOffset, i;
    TRIGGERRANGE       rgRange;
 
-   //
-   // Get the party location
-   //
-   x = PAL_X(gpGlobals->viewport) + PAL_X(gpGlobals->partyoffset);
-   y = PAL_Y(gpGlobals->viewport) + PAL_Y(gpGlobals->partyoffset);
-
-   if (gpGlobals->wPartyDirection == kDirNorth || gpGlobals->wPartyDirection == kDirEast)
+   if (wDirection == kDirNorth || wDirection == kDirEast)
    {
       xOffset = 16;
    }
@@ -396,7 +395,7 @@ PAL_GetSearchTriggerRange(
       xOffset = -16;
    }
 
-   if (gpGlobals->wPartyDirection == kDirEast || gpGlobals->wPartyDirection == kDirSouth)
+   if (wDirection == kDirEast || wDirection == kDirSouth)
    {
       yOffset = 8;
    }
@@ -419,6 +418,88 @@ PAL_GetSearchTriggerRange(
    return rgRange;
 }
 
+TRIGGERRANGE
+PAL_GetSearchTriggerRange(
+   VOID
+)
+/*++
+  Purpose:
+
+    Calculate 13 checkpoint coordinates for manual event search.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    The checkpoints, in the order they are searched.
+
+--*/
+{
+   return PAL_GetSearchTriggerRangeAt(
+      PAL_X(gpGlobals->viewport) + PAL_X(gpGlobals->partyoffset),
+      PAL_Y(gpGlobals->viewport) + PAL_Y(gpGlobals->partyoffset),
+      gpGlobals->wPartyDirection);
+}
+
+VOID
+PAL_TriggerSearchEvent(
+   WORD      wEventObjectID
+)
+/*++
+  Purpose:
+
+    Run the trigger script of an event the party has found by searching.
+
+  Parameters:
+
+    [IN]  wEventObjectID - the event.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   LPEVENTOBJECT      p = &(gpGlobals->g.lprgEventObject[wEventObjectID - 1]);
+   int                l;
+
+   //
+   // Adjust direction/gesture for party members and the event object
+   //
+   if (p->nSpriteFrames * 4 > p->wCurrentFrameNum)
+   {
+      p->wCurrentFrameNum = 0; // use standing gesture
+      p->wDirection = (gpGlobals->wPartyDirection + 2) % 4; // face the party
+
+      for (l = 0; l <= gpGlobals->wMaxPartyMemberIndex; l++)
+      {
+         //
+         // All party members should face the event object
+         //
+         gpGlobals->rgParty[l].wFrame = gpGlobals->wPartyDirection * 3;
+      }
+
+      //
+      // Redraw everything
+      //
+      PAL_MakeScene();
+      VIDEO_UpdateScreen(NULL);
+   }
+
+   //
+   // Execute the script
+   //
+   p->wTriggerScript = PAL_RunTriggerScript(p->wTriggerScript, wEventObjectID);
+
+   //
+   // Clear inputs and delay for a short time
+   //
+   UTIL_Delay(50);
+   PAL_ClearKeyState();
+}
+
 VOID
 PAL_Search(
    VOID
@@ -438,7 +519,7 @@ PAL_Search(
 
 --*/
 {
-   int                x, y, xOffset, yOffset, dx, dy, dh, ex, ey, eh, i, k, l;
+   int                dx, dy, dh, ex, ey, eh, i, k;
    LPEVENTOBJECT      p;
    TRIGGERRANGE       rgRange;
 
@@ -470,39 +551,7 @@ PAL_Search(
             continue;
          }
 
-         //
-         // Adjust direction/gesture for party members and the event object
-         //
-         if (p->nSpriteFrames * 4 > p->wCurrentFrameNum)
-         {
-            p->wCurrentFrameNum = 0; // use standing gesture
-            p->wDirection = (gpGlobals->wPartyDirection + 2) % 4; // face the party
-
-            for (l = 0; l <= gpGlobals->wMaxPartyMemberIndex; l++)
-            {
-               //
-               // All party members should face the event object
-               //
-               gpGlobals->rgParty[l].wFrame = gpGlobals->wPartyDirection * 3;
-            }
-
-            //
-            // Redraw everything
-            //
-            PAL_MakeScene();
-            VIDEO_UpdateScreen(NULL);
-         }
-
-         //
-         // Execute the script
-         //
-         p->wTriggerScript = PAL_RunTriggerScript(p->wTriggerScript, k + 1);
-
-         //
-         // Clear inputs and delay for a short time
-         //
-         UTIL_Delay(50);
-         PAL_ClearKeyState();
+         PAL_TriggerSearchEvent(k + 1);
 
          return; // don't go further
       }
@@ -538,6 +587,15 @@ PAL_StartFrame(
    }
 
    //
+   // Let the trainer do its part. This may run the script of an event.
+   //
+   TRAINER_Update();
+   if (gpGlobals->fEnteringScene)
+   {
+      return;
+   }
+
+   //
    // Update the positions and gestures of party members
    //
    PAL_UpdateParty();
@@ -546,6 +604,7 @@ PAL_StartFrame(
    // Update the scene
    //
    PAL_MakeScene();
+   TRAINER_DrawOverlay();
    VIDEO_UpdateScreen(NULL);
 
    if (g_InputState.dwKeyPress & kKeyMenu)
@@ -596,6 +655,13 @@ PAL_StartFrame(
       // Quit Game
       //
       PAL_QuitGame();
+   }
+   else if (g_InputState.dwKeyPress & kKeyTrainer)
+   {
+      //
+      // Show the trainer menu
+      //
+      TRAINER_Menu();
    }
 }
 
@@ -678,5 +744,13 @@ PAL_WaitForAnyKey(
 
 --*/
 {
+   //
+   // Do not linger on the results of battles when fighting them one after another
+   //
+   if (TRAINER_IsFightingByItself() && wTimeOut > 500)
+   {
+      wTimeOut = 500;
+   }
+
    PAL_WaitForKeyInternal(wTimeOut, TRUE);
 }

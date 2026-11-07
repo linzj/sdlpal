@@ -508,7 +508,14 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\tests\test_trainer.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\text.c" />
+    <ClCompile Include="..\trainer.c" />
     <ClCompile Include="..\timidity\common.c" />
     <ClCompile Include="..\timidity\instrum.c" />
     <ClCompile Include="..\timidity\mix.c" />
@@ -720,6 +727,7 @@
     <ClInclude Include="..\audio.h" />
     <ClInclude Include="..\sdl_compat\sdl_compat.h" />
     <ClInclude Include="..\text.h" />
+    <ClInclude Include="..\trainer.h" />
     <ClInclude Include="..\timidity\common.h" />
     <ClInclude Include="..\timidity\instrum.h" />
     <ClInclude Include="..\timidity\mix.h" />
