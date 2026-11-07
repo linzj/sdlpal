@@ -24,6 +24,7 @@
 //    or goes through as many scenes as it takes to the deepest place of a dungeon.
 //    It only steers the party the way the arrow keys do, so events and battles still happen
 //    as they would for a player, and any key takes back control.
+//    Whoever stands in the way of an exit gets talked to, as that is what moves the story on.
 //  - Puzzles: goes to whatever in the scene an item in the inventory is meant to be used on,
 //    and uses it, the way the hammer breaks the statues around the lake.
 //  - Monsters: walks up to the monsters of the scene and fights them by itself, to level up.
@@ -69,9 +70,11 @@
 #define MIN_DUNGEON_FLOORS      3   // fewer than this is no dungeon, and has no deepest place
 
 // How a route may be found: first without touching any event, and if that fails through
-// monsters and other events that do not move the party away or start a story.
+// monsters and other events that do not move the party away or start a story. The last one
+// is not for walking: it only tells what has to be got past, see TRAINER_FindObstacle().
 #define TIER_SAFE               1
 #define TIER_THROUGH_MONSTERS   2
+#define TIER_THROUGH_OBSTACLES  3
 
 #define START_GRACE_FRAMES      3   // the key that confirmed the menu may still be down
 #define STUCK_FRAMES            30  // something the route did not expect is in the way
@@ -116,6 +119,13 @@ typedef struct tagTRAINERZONE
    INT             x, y, iRadius;
 } TRAINERZONE;
 
+// Something in the way that going up to it may get out of the way.
+typedef struct tagTRAINEROBSTACLE
+{
+   WORD            wEvent;
+   INT             x, y, iRadius;
+} TRAINEROBSTACLE;
+
 // A way out of a place reachable on foot, and where it leads.
 typedef struct tagTRAINEREDGE
 {
@@ -150,6 +160,7 @@ typedef struct tagTRAINERTARGET
 {
    WORD            wEvent;
    INT             iDist;     // -1 if there is no way to get there
+   WORD            wObstacle; // what has to be got past first, and iDist is how far that is
 } TRAINERTARGET;
 
 static struct
@@ -170,7 +181,8 @@ static struct
    WORD            wHuntLevel;   // 0 = until stopped
    INT             nFights;
    INT             nIdleFrames;
-   WORD            wHop;         // the raft or teleporter on the way to the target, if any
+   WORD            wHop;         // the raft, teleporter or obstacle on the way to the target, if any
+   BOOL            fObstacles;   // go up to what stands in the way, which may start a story
 } g_Walk = { kTrainerJobNone, 0, 0, kDirUnknown };
 
 static WCHAR            g_szToast[64];
@@ -182,6 +194,8 @@ static WORD             g_wPreviousScene = 0;
 
 static TRAINERZONE      g_rgZone[MAX_ZONES];
 static INT              g_nZone;
+static TRAINEROBSTACLE  g_rgObstacle[MAX_TARGETS];
+static INT              g_nObstacle;
 
 static TRAINERTARGET    g_rgTarget[MAX_TARGETS];
 static INT              g_nTarget;
@@ -561,6 +575,38 @@ TRAINER_IsTreasure(
 }
 
 static BOOL
+TRAINER_LeadsElsewhere(
+   WORD           wEventObjectID
+)
+/*++
+  Purpose:
+
+    Tell whether an event takes the party to another scene, whatever else it does.
+
+  Parameters:
+
+    [IN]  wEventObjectID - the event.
+
+  Return value:
+
+    TRUE if the event leads to another scene.
+
+--*/
+{
+   const EVENTOBJECT         *p = EVENT(wEventObjectID);
+   const TRAINERSCRIPTINFO   *pInfo;
+
+   if (!EVENT_IS_ACTIVE(p) || p->wTriggerMode == kTriggerNone)
+   {
+      return FALSE;
+   }
+
+   pInfo = TRAINER_GetScriptInfo(p->wTriggerScript);
+
+   return (pInfo->wFlags & kTrainerScriptScene) != 0 && pInfo->wScene != gpGlobals->wNumScene;
+}
+
+static BOOL
 TRAINER_IsExit(
    WORD           wEventObjectID
 )
@@ -579,19 +625,8 @@ TRAINER_IsExit(
 
 --*/
 {
-   const EVENTOBJECT         *p = EVENT(wEventObjectID);
-   const TRAINERSCRIPTINFO   *pInfo;
-
-   if (!EVENT_IS_ACTIVE(p) || p->wTriggerMode == kTriggerNone)
-   {
-      return FALSE;
-   }
-
-   pInfo = TRAINER_GetScriptInfo(p->wTriggerScript);
-
-   return (pInfo->wFlags & kTrainerScriptScene) != 0 &&
-      (pInfo->wFlags & (kTrainerScriptBattle | kTrainerScriptStory)) == 0 &&
-      pInfo->wScene != gpGlobals->wNumScene;
+   return TRAINER_LeadsElsewhere(wEventObjectID) &&
+      (TRAINER_GetScriptInfo(EVENT(wEventObjectID)->wTriggerScript)->wFlags & (kTrainerScriptBattle | kTrainerScriptStory)) == 0;
 }
 
 static BOOL
@@ -630,6 +665,86 @@ TRAINER_IsMonster(
    return EVENT_IS_ACTIVE(p) && TRAINER_HasMonsterScript(p);
 }
 
+static BOOL
+TRAINER_IsWayOut(
+   const EVENTOBJECT   *p
+)
+/*++
+  Purpose:
+
+    Tell whether an event moves the party when used, to somewhere the script tells or to
+    another scene, and nothing else stands in the way: no story and no fight.
+
+  Parameters:
+
+    [IN]  p - the event.
+
+  Return value:
+
+    TRUE if the event is a way out.
+
+--*/
+{
+   const WORD wFlags = TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags;
+
+   return EVENT_IS_ACTIVE(p) && p->wTriggerMode != kTriggerNone &&
+      (wFlags & (kTrainerScriptScene | kTrainerScriptMove | kTrainerScriptCarryTo)) != 0 &&
+      (wFlags & (kTrainerScriptStory | kTrainerScriptBattle)) == 0;
+}
+
+static BOOL
+TRAINER_WasTried(
+   WORD           wEventObjectID
+)
+{
+   int   i;
+
+   for (i = 0; i < g_Walk.nTried; i++)
+   {
+      if (g_Walk.rgwTried[i] == wEventObjectID)
+      {
+         return TRUE;
+      }
+   }
+
+   return FALSE;
+}
+
+static BOOL
+TRAINER_CanBeGotPast(
+   WORD           wEventObjectID
+)
+/*++
+  Purpose:
+
+    Tell whether an event in the way may get out of the way by going up to it: someone to
+    talk to, a boss, or a story that starts at some place. A way out does not, as it takes
+    the party away, and neither does what has already been tried without moving aside.
+
+  Parameters:
+
+    [IN]  wEventObjectID - the event.
+
+  Return value:
+
+    TRUE if it is worth going up to the event.
+
+--*/
+{
+   const EVENTOBJECT *p = EVENT(wEventObjectID);
+
+   //
+   // Nothing can stand close enough to touch a blocker of the nearest kind.
+   //
+   if (!EVENT_IS_ACTIVE(p) || p->wTriggerMode == kTriggerNone || p->wTriggerScript == 0 ||
+      (p->wTriggerMode == kTriggerTouchNear && p->sState >= kObjStateBlocker))
+   {
+      return FALSE;
+   }
+
+   return !TRAINER_IsWayOut(p) && !(g_Walk.job != kTrainerJobNone && TRAINER_WasTried(wEventObjectID));
+}
+
 static VOID
 TRAINER_BuildZones(
    const WORD    *rgwTarget,
@@ -640,6 +755,7 @@ TRAINER_BuildZones(
   Purpose:
 
     List the places around the events of the current scene that a route has to stay out of.
+    With TIER_THROUGH_OBSTACLES those it may be possible to get past go to g_rgObstacle.
 
   Parameters:
 
@@ -647,7 +763,7 @@ TRAINER_BuildZones(
 
     [IN]  nTarget - the number of those events.
 
-    [IN]  iTier - TIER_SAFE or TIER_THROUGH_MONSTERS.
+    [IN]  iTier - one of the TIER_ values.
 
   Return value:
 
@@ -658,6 +774,7 @@ TRAINER_BuildZones(
    int   id, i;
 
    g_nZone = 0;
+   g_nObstacle = 0;
 
    for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT() && g_nZone < MAX_ZONES; id++)
    {
@@ -696,7 +813,16 @@ TRAINER_BuildZones(
          iRadius = TOUCH_RADIUS(p);
       }
 
-      if (iRadius > 0)
+      if (iRadius > 0 && iTier >= TIER_THROUGH_OBSTACLES && !fIsTarget && g_nObstacle < MAX_TARGETS &&
+         TRAINER_CanBeGotPast((WORD)id))
+      {
+         g_rgObstacle[g_nObstacle].wEvent = (WORD)id;
+         g_rgObstacle[g_nObstacle].x = p->x;
+         g_rgObstacle[g_nObstacle].y = p->y;
+         g_rgObstacle[g_nObstacle].iRadius = iRadius;
+         g_nObstacle++;
+      }
+      else if (iRadius > 0)
       {
          g_rgZone[g_nZone].x = p->x;
          g_rgZone[g_nZone].y = p->y;
@@ -991,35 +1117,157 @@ TRAINER_FindRoute(
       TRAINER_FindRouteInTier(rgwTarget, nTarget, TIER_THROUGH_MONSTERS, pRoute);
 }
 
-#define SCENE_IN_SET(set, s)    (((set)[(s) >> 3] & (1 << ((s) & 7))) != 0)
-#define ADD_SCENE_TO_SET(set, s) ((set)[(s) >> 3] |= (BYTE)(1 << ((s) & 7)))
+static WORD
+TRAINER_ObstacleAt(
+   int            x,
+   int            y
+)
+{
+   int   i;
+
+   for (i = 0; i < g_nObstacle; i++)
+   {
+      if (abs(g_rgObstacle[i].x - x) + abs(g_rgObstacle[i].y - y) * 2 < g_rgObstacle[i].iRadius)
+      {
+         return g_rgObstacle[i].wEvent;
+      }
+   }
+
+   return 0;
+}
 
 static BOOL
-TRAINER_IsWayOut(
-   const EVENTOBJECT   *p
+TRAINER_FindObstacle(
+   WORD           wTarget,
+   WORD          *pwObstacle
 )
 /*++
   Purpose:
 
-    Tell whether an event moves the party when used, to somewhere the script tells or to
-    another scene, and nothing else stands in the way: no story and no fight.
+    Find what to go up to for getting to an event there is no route to: the first thing on
+    the way that may let the party through once it has had its say.
+
+    The way is the one past as few of those as possible, with a breadth-first search that
+    only goes past one more when there is nowhere else left to go. People in a crowd can
+    be walked around, so the shortest way through them may not be what is really in the way.
 
   Parameters:
 
-    [IN]  p - the event.
+    [IN]  wTarget - the event to get to.
+
+    [OUT] pwObstacle - what to go up to.
 
   Return value:
 
-    TRUE if the event is a way out.
+    TRUE if there is something to go up to.
 
 --*/
 {
-   const WORD wFlags = TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags;
+   static BYTE    rgbState[GRID_WIDTH * GRID_HEIGHT];   // one of the values below
+   static WORD    rgwQueue[GRID_WIDTH * GRID_HEIGHT];
+   static WORD    rgwPast[GRID_WIDTH * GRID_HEIGHT];    // where going past one more leads to
+   static WORD    rgwFirst[GRID_WIDTH * GRID_HEIGHT];   // the first obstacle on the way to here
 
-   return EVENT_IS_ACTIVE(p) && p->wTriggerMode != kTriggerNone &&
-      (wFlags & (kTrainerScriptScene | kTrainerScriptMove | kTrainerScriptCarryTo)) != 0 &&
-      (wFlags & (kTrainerScriptStory | kTrainerScriptBattle)) == 0;
+   enum { kUnvisited, kVisited, kPast };
+
+   const int      xStart = PAL_X(gpGlobals->viewport) + PAL_X(gpGlobals->partyoffset);
+   const int      yStart = PAL_Y(gpGlobals->viewport) + PAL_Y(gpGlobals->partyoffset);
+   const int      xRest = xStart & 15, yRest = yStart & 7;
+   const int      iStart = (yStart >> 3) * GRID_WIDTH + (xStart >> 4);
+   int            iHead = 0, iTail = 0, nPast = 0, i;
+
+   if (xStart < 0 || yStart < 0 || iStart >= GRID_WIDTH * GRID_HEIGHT)
+   {
+      return FALSE;
+   }
+
+   TRAINER_BuildZones(&wTarget, 1, TIER_THROUGH_OBSTACLES);
+
+   memset(rgbState, kUnvisited, sizeof(rgbState));
+   rgbState[iStart] = kVisited;
+   rgwFirst[iStart] = 0;
+   rgwQueue[iTail++] = (WORD)iStart;
+
+   while (iHead < iTail)
+   {
+      const int      iNode = rgwQueue[iHead++];
+      const int      gx = iNode % GRID_WIDTH, gy = iNode / GRID_WIDTH;
+      const int      x = gx * 16 + xRest, y = gy * 8 + yRest;
+      const WORD     wHere = TRAINER_ObstacleAt(x, y);
+      PALDIRECTION   dirFace;
+      int            dir;
+
+      if (TRAINER_CanReachEvent(x, y, EVENT(wTarget), &dirFace))
+      {
+         *pwObstacle = rgwFirst[iNode];
+         return *pwObstacle != 0;
+      }
+
+      for (dir = kDirSouth; dir < kDirUnknown; dir++)
+      {
+         const int   gxNext = gx + ((dir == kDirWest || dir == kDirSouth) ? -1 : 1);
+         const int   gyNext = gy + ((dir == kDirWest || dir == kDirNorth) ? -1 : 1);
+         const int   xNext = gxNext * 16 + xRest, yNext = gyNext * 8 + yRest;
+         int         iNext;
+         WORD        wThere;
+
+         if (gxNext < 0 || gxNext >= GRID_WIDTH || gyNext < 0 || gyNext >= GRID_HEIGHT)
+         {
+            continue;
+         }
+
+         iNext = gyNext * GRID_WIDTH + gxNext;
+
+         if (rgbState[iNext] == kVisited)
+         {
+            continue;
+         }
+
+         if (rgbState[iNext] == kUnvisited && !TRAINER_IsFree(xNext, yNext))
+         {
+            rgbState[iNext] = kVisited;
+            continue;
+         }
+
+         wThere = TRAINER_ObstacleAt(xNext, yNext);
+
+         if (wThere == 0 || wThere == wHere)
+         {
+            rgbState[iNext] = kVisited;
+            rgwFirst[iNext] = rgwFirst[iNode];
+            rgwQueue[iTail++] = (WORD)iNext;
+         }
+         else if (rgbState[iNext] == kUnvisited)
+         {
+            rgbState[iNext] = kPast;
+            rgwFirst[iNext] = (rgwFirst[iNode] != 0) ? rgwFirst[iNode] : wThere;
+            rgwPast[nPast++] = (WORD)iNext;
+         }
+      }
+
+      if (iHead == iTail)
+      {
+         //
+         // Nowhere left to go without getting past one more.
+         //
+         for (i = 0; i < nPast; i++)
+         {
+            if (rgbState[rgwPast[i]] == kPast)
+            {
+               rgbState[rgwPast[i]] = kVisited;
+               rgwQueue[iTail++] = rgwPast[i];
+            }
+         }
+
+         nPast = 0;
+      }
+   }
+
+   return FALSE;
 }
+
+#define SCENE_IN_SET(set, s)    (((set)[(s) >> 3] & (1 << ((s) & 7))) != 0)
+#define ADD_SCENE_TO_SET(set, s) ((set)[(s) >> 3] |= (BYTE)(1 << ((s) & 7)))
 
 static BOOL
 TRAINER_IsWanted(
@@ -1911,24 +2159,6 @@ TRAINER_StartJob(
    TRAINER_ApplyAutoBattle();
 }
 
-static BOOL
-TRAINER_WasTried(
-   WORD           wEventObjectID
-)
-{
-   int   i;
-
-   for (i = 0; i < g_Walk.nTried; i++)
-   {
-      if (g_Walk.rgwTried[i] == wEventObjectID)
-      {
-         return TRUE;
-      }
-   }
-
-   return FALSE;
-}
-
 static VOID
 TRAINER_MarkTried(
    WORD           wEventObjectID
@@ -2423,6 +2653,10 @@ TRAINER_FailTarget(
       TRAINER_MarkTried(g_Walk.wTarget);
       g_Walk.wTarget = 0;
    }
+   else if (g_Walk.fObstacles && g_Walk.nTried > 0)
+   {
+      TRAINER_EndJob(TR("阻礙還在，暫時過不去", "阻碍还在，暂时过不去"));
+   }
    else
    {
       TRAINER_EndJob(TR("無法到達", "无法到达"));
@@ -2508,6 +2742,7 @@ TRAINER_Walk(
    if (g_Walk.wHop != 0 && !EVENT_IS_ACTIVE(EVENT(g_Walk.wHop)))
    {
       g_Walk.wHop = 0;
+      g_Walk.nStepsLeft = -1;
    }
 
    if (g_Walk.wHop == 0 && !TRAINER_FindRoute(&g_Walk.wTarget, 1, &route))
@@ -2517,11 +2752,25 @@ TRAINER_Walk(
       //
       // Not on this part of the map: is there a raft or a teleporter that leads there?
       //
-      if (g_Walk.job == kTrainerJobRoute || g_Walk.job == kTrainerJobHunt ||
-         !TRAINER_PlanHop(&g_Walk.wTarget, 1, &wHop, &wChosen))
+      if (g_Walk.job == kTrainerJobRoute || g_Walk.job == kTrainerJobHunt)
       {
          TRAINER_FailTarget();
          return;
+      }
+
+      if (!TRAINER_PlanHop(&g_Walk.wTarget, 1, &wHop, &wChosen))
+      {
+         //
+         // Is there something in the way? Going up to it is the one thing left to try, and
+         // only once: what it says may well be that the party has to come back later.
+         //
+         if (!g_Walk.fObstacles || !TRAINER_FindObstacle(g_Walk.wTarget, &wHop))
+         {
+            TRAINER_FailTarget();
+            return;
+         }
+
+         TRAINER_MarkTried(wHop);
       }
 
       g_Walk.wHop = wHop;
@@ -2558,6 +2807,7 @@ TRAINER_Walk(
          }
 
          g_Walk.wHop = 0;
+         g_Walk.nStepsLeft = -1;
          return;
       }
    }
@@ -2900,7 +3150,12 @@ TRAINER_DrawOverlay(
    }
    else if (g_Walk.job == kTrainerJobWalk)
    {
-      lpszText = TR("尋路中，按任意鍵停止", "寻路中，按任意键停止");
+      //
+      // Only an obstacle counts as tried before the party gets there.
+      //
+      lpszText = (g_Walk.wHop != 0 && TRAINER_WasTried(g_Walk.wHop)) ?
+         TR("前往阻礙，按任意鍵停止", "前往阻碍，按任意键停止") :
+         TR("尋路中，按任意鍵停止", "寻路中，按任意键停止");
    }
    else if (g_Walk.job == kTrainerJobRoute)
    {
@@ -3196,23 +3451,28 @@ TRAINER_ReadNumber(
 
 static LPCWSTR
 TRAINER_TargetDistanceText(
-   INT            iDist
+   const TRAINERTARGET   *pTarget
 )
 {
    static WCHAR   szText[16];
 
-   if (iDist < 0)
+   if (pTarget->iDist < 0)
    {
       return TR("無路", "无路");
    }
 
-   PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR), L"%d步", iDist);
+   PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR),
+      (pTarget->wObstacle != 0) ? TR("阻礙 %d步", "阻碍 %d步") : L"%d步", pTarget->iDist);
    return szText;
 }
 
+// The order of the list: what can be walked to, then what is behind something, then the rest.
+#define TARGET_RANK(p)          (((p)->iDist < 0) ? 2 : (((p)->wObstacle != 0) ? 1 : 0))
+
 static VOID
 TRAINER_ListTargets(
-   BOOL         (*lpfnFilter)(WORD)
+   BOOL         (*lpfnFilter)(WORD),
+   BOOL           fObstacles
 )
 /*++
   Purpose:
@@ -3223,6 +3483,8 @@ TRAINER_ListTargets(
   Parameters:
 
     [IN]  lpfnFilter - tells which events to list.
+
+    [IN]  fObstacles - TRUE to tell what stands in the way of those out of reach.
 
   Return value:
 
@@ -3243,6 +3505,7 @@ TRAINER_ListTargets(
 
          g_rgTarget[g_nTarget].wEvent = wTarget;
          g_rgTarget[g_nTarget].iDist = TRAINER_FindRoute(&wTarget, 1, &route) ? route.iDist : -1;
+         g_rgTarget[g_nTarget].wObstacle = 0;
          g_nTarget++;
       }
    }
@@ -3281,23 +3544,64 @@ TRAINER_ListTargets(
       g_nWant = 0;
    }
 
+   for (i = 0; i < g_nTarget && fObstacles; i++)
+   {
+      TRAINERROUTE   route;
+      WORD           wObstacle;
+
+      if (g_rgTarget[i].iDist < 0 && TRAINER_FindObstacle(g_rgTarget[i].wEvent, &wObstacle) &&
+         TRAINER_FindRoute(&wObstacle, 1, &route))
+      {
+         g_rgTarget[i].iDist = route.iDist;
+         g_rgTarget[i].wObstacle = wObstacle;
+      }
+   }
+
    for (i = 1; i < g_nTarget; i++)
    {
       TRAINERTARGET t = g_rgTarget[i];
 
       for (j = i; j > 0; j--)
       {
-         const INT d = g_rgTarget[j - 1].iDist;
+         const TRAINERTARGET *q = &g_rgTarget[j - 1];
 
-         if (d >= 0 && (t.iDist < 0 || d <= t.iDist))
+         if (TARGET_RANK(q) < TARGET_RANK(&t) || (TARGET_RANK(q) == TARGET_RANK(&t) && q->iDist <= t.iDist))
          {
             break;
          }
 
-         g_rgTarget[j] = g_rgTarget[j - 1];
+         g_rgTarget[j] = *q;
       }
 
       g_rgTarget[j] = t;
+   }
+}
+
+static VOID
+TRAINER_ListExits(
+   VOID
+)
+/*++
+  Purpose:
+
+    List the exits of the current scene. With none that can simply be walked to, the way on
+    may well be the story, so what leads to another scene as part of it is listed as well.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   TRAINER_ListTargets(TRAINER_IsExit, TRUE);
+
+   if (g_nTarget == 0 || TARGET_RANK(&g_rgTarget[0]) != 0)
+   {
+      TRAINER_ListTargets(TRAINER_LeadsElsewhere, TRUE);
    }
 }
 
@@ -3328,12 +3632,12 @@ TRAINER_TreasureLabel(
    if (pInfo->wItem != 0)
    {
       PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), L"%ls%ls  %ls", PAL_GetWord(pInfo->wItem),
-         (pInfo->nLoot > 1) ? L" 等" : L"", TRAINER_TargetDistanceText(iDist));
+         (pInfo->nLoot > 1) ? L" 等" : L"", TRAINER_TargetDistanceText(&g_rgTarget[iItem - 1]));
    }
    else
    {
       PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), L"%ls %d  %ls", PAL_GetWord(CASH_LABEL),
-         pInfo->wCash, TRAINER_TargetDistanceText(iDist));
+         pInfo->wCash, TRAINER_TargetDistanceText(&g_rgTarget[iItem - 1]));
    }
 
    return g_szLabel;
@@ -3360,7 +3664,7 @@ TRAINER_TreasureMenu(
 {
    INT   iCursor = 0, i;
 
-   TRAINER_ListTargets(TRAINER_IsTreasure);
+   TRAINER_ListTargets(TRAINER_IsTreasure, FALSE);
 
    if (g_nTarget == 0)
    {
@@ -3428,8 +3732,9 @@ TRAINER_ExitLabel(
    }
 
    PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("場景 %d  %ls%ls%ls", "场景 %d  %ls%ls%ls"),
-      pInfo->wScene, TRAINER_TargetDistanceText(iDist), lpszWhere,
-      (pInfo->wScene == g_wPreviousScene) ? TR("  來路", "  来路") : L"");
+      pInfo->wScene, TRAINER_TargetDistanceText(&g_rgTarget[iItem]), lpszWhere,
+      (pInfo->wFlags & (kTrainerScriptBattle | kTrainerScriptStory)) ? TR("  劇情", "  剧情") :
+      ((pInfo->wScene == g_wPreviousScene) ? TR("  來路", "  来路") : L""));
 
    return g_szLabel;
 }
@@ -3456,7 +3761,7 @@ TRAINER_ExitMenu(
 {
    INT   iCursor = 0, i;
 
-   TRAINER_ListTargets(TRAINER_IsExit);
+   TRAINER_ListExits();
 
    g_wDeepestScene = TRAINER_FindDeepestScene();
 
@@ -3483,6 +3788,7 @@ TRAINER_ExitMenu(
    if (i >= 0)
    {
       TRAINER_StartJob(kTrainerJobWalk, g_rgTarget[i].wEvent);
+      g_Walk.fObstacles = TRUE;
       return TRUE;
    }
 
