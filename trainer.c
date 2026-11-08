@@ -24,6 +24,7 @@
 //    treasures and puzzles of each scene, whatever in it may move the story on, the nearest
 //    such thing anywhere else, the bottom of the dungeon, then scenes not seen yet.
 //    Meanwhile the pages of dialogs turn by themselves, and choices wait for the player.
+//    The thorough one gets every treasure of each scene first, the way the walking does.
 //  - Walking: goes to one treasure or exit of the current scene, or collects every treasure,
 //    or goes through as many scenes as it takes to the deepest place of a dungeon.
 //    It only steers the party the way the arrow keys do, so events and battles still happen
@@ -234,6 +235,8 @@ static struct
    WORD            wPendingScript;                    // and the script that had
    BOOL            fPendingStep;                      // something to trigger, not a way to go
    BOOL            fReached;                          // the walk got there
+   BOOL            fThorough;                         // gets every treasure of each scene first
+   WORD            wCollected;                        // the scene whose treasures it has just gone for
 } g_Story;
 
 static BOOL             g_fWantAnywhere = FALSE;      // look for the events wanted in every scene
@@ -4470,6 +4473,61 @@ TRAINER_StoryUnseen(
    return TRUE;
 }
 
+static BOOL
+TRAINER_StoryCollect(
+   VOID
+)
+/*++
+  Purpose:
+
+    Go for every treasure of the current scene, the way the treasure menu does: past gates
+    and through other scenes, but without talking to anyone. What is still out of reach
+    after that gets another go when the party comes back from another scene, a few times.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    TRUE if the party is going.
+
+--*/
+{
+   int   id;
+
+   //
+   // What the last go left is out of reach for now.
+   //
+   if (g_Story.wCollected != 0)
+   {
+      for (id = FIRST_EVENT_OF(g_Story.wCollected); id <= LAST_EVENT_OF(g_Story.wCollected); id++)
+      {
+         if (TRAINER_IsTreasure((WORD)id) && !TRAINER_StoryFailed((WORD)id))
+         {
+            TRAINER_MarkStoryFailed((WORD)id);
+         }
+      }
+
+      g_Story.wCollected = 0;
+   }
+
+   for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT(); id++)
+   {
+      if (TRAINER_IsTreasure((WORD)id) && !TRAINER_StoryTried((WORD)id) && !TRAINER_StoryFailed((WORD)id))
+      {
+         TRAINER_StartStoryJob(kTrainerJobCollect, 0);
+         g_Walk.fObstacles = FALSE;
+         g_Walk.fLevers = TRUE;
+         g_Walk.wHome = gpGlobals->wNumScene;
+         g_Story.wCollected = gpGlobals->wNumScene;
+         return TRUE;
+      }
+   }
+
+   return FALSE;
+}
+
 static VOID
 TRAINER_NextStoryStep(
    VOID
@@ -4531,9 +4589,10 @@ TRAINER_NextStoryStep(
 
    //
    // The treasures that can be got to now, one after another, and the puzzles of the scene
-   // in one go.
+   // in one go. Or all the treasures of the scene, the way the treasure menu gets them,
+   // through other scenes if need be.
    //
-   if (TRAINER_StoryHere(TRAINER_IsTreasure))
+   if (g_Story.fThorough ? TRAINER_StoryCollect() : TRAINER_StoryHere(TRAINER_IsTreasure))
    {
       return;
    }
@@ -5855,7 +5914,7 @@ TRAINER_MagicMenu(
 
 static VOID
 TRAINER_StartStory(
-   VOID
+   BOOL           fThorough
 )
 /*++
   Purpose:
@@ -5864,7 +5923,7 @@ TRAINER_StartStory(
 
   Parameters:
 
-    None.
+    [IN]  fThorough - TRUE to get every treasure of each scene before going on.
 
   Return value:
 
@@ -5875,6 +5934,7 @@ TRAINER_StartStory(
    TRAINER_EndJob(NULL);
    memset(&g_Story, 0, sizeof(g_Story));
    g_Story.fActive = TRUE;
+   g_Story.fThorough = fThorough;
    TRAINER_ApplyAutoBattle();
 }
 
@@ -5890,21 +5950,24 @@ TRAINER_MainLabel(
       return TR("自動推進劇情", "自动推进剧情");
 
    case 1:
-      return TR("尋寶", "寻宝");
+      return TR("自動推進劇情（搜刮乾淨）", "自动推进剧情（搜刮干净）");
 
    case 2:
-      return L"前往出口";
+      return TR("尋寶", "寻宝");
 
    case 3:
-      return TR("自動解謎", "自动解谜");
+      return L"前往出口";
 
    case 4:
-      return TR("自動打怪", "自动打怪");
+      return TR("自動解謎", "自动解谜");
 
    case 5:
-      return g_fAutoBattle ? TR("自動戰鬥：開啟", "自动战斗：开启") : TR("自動戰鬥：關閉", "自动战斗：关闭");
+      return TR("自動打怪", "自动打怪");
 
    case 6:
+      return g_fAutoBattle ? TR("自動戰鬥：開啟", "自动战斗：开启") : TR("自動戰鬥：關閉", "自动战斗：关闭");
+
+   case 7:
       if (g_wAutoLevel == 0)
       {
          return TR("自動升級：關閉", "自动升级：关闭");
@@ -5912,11 +5975,11 @@ TRAINER_MainLabel(
       PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("自動升級：%d 級", "自动升级：%d 级"), g_wAutoLevel);
       return g_szLabel;
 
-   case 7:
+   case 8:
       PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("修改金錢：%d", "修改金钱：%d"), (INT)gpGlobals->dwCash);
       return g_szLabel;
 
-   case 8:
+   case 9:
       return TR("獲得物品", "获得物品");
 
    default:
@@ -5948,48 +6011,53 @@ TRAINER_Menu(
 
    while (!fClose)
    {
-      switch (TRAINER_ListMenu(L"修改器", 10, 1, &iCursor, TRAINER_MainLabel, NULL))
+      switch (TRAINER_ListMenu(L"修改器", 11, 1, &iCursor, TRAINER_MainLabel, NULL))
       {
       case 0:
-         TRAINER_StartStory();
+         TRAINER_StartStory(FALSE);
          fClose = TRUE;
          break;
 
       case 1:
-         fClose = TRAINER_TreasureMenu();
+         TRAINER_StartStory(TRUE);
+         fClose = TRUE;
          break;
 
       case 2:
-         fClose = TRAINER_ExitMenu();
+         fClose = TRAINER_TreasureMenu();
          break;
 
       case 3:
+         fClose = TRAINER_ExitMenu();
+         break;
+
+      case 4:
          TRAINER_StartPuzzle();
          fClose = TRUE;
          break;
 
-      case 4:
+      case 5:
          fClose = TRAINER_HuntMenu();
          break;
 
-      case 5:
+      case 6:
          g_fAutoBattle = !g_fAutoBattle;
          gpGlobals->fAutoBattle = g_fAutoBattle;
          break;
 
-      case 6:
+      case 7:
          fClose = TRAINER_LevelMenu();
          break;
 
-      case 7:
+      case 8:
          TRAINER_MoneyMenu();
          break;
 
-      case 8:
+      case 9:
          TRAINER_ItemMenu();
          break;
 
-      case 9:
+      case 10:
          TRAINER_MagicMenu();
          break;
 
