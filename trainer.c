@@ -69,6 +69,7 @@
 #define MAX_TARGETS             256
 #define MAX_SCRIPT_WALK         2048
 #define MAX_SCRIPT_TODO         64
+#define MAX_SCRIPT_CALLS        8   // scripts calling scripts, when following one line by line
 #define MAX_PUZZLES             32
 #define MAX_STORY_TRIED         1024
 #define MAX_STORY_FAILED        64
@@ -399,6 +400,100 @@ TRAINER_PushNextLines(
    }
 }
 
+static BOOL
+TRAINER_StepsAfter(
+   WORD           wFrom,
+   INT           *pdx,
+   INT           *pdy
+)
+/*++
+  Purpose:
+
+    Add up the single steps a script has the party take after putting it somewhere, the
+    way it climbs a stair on its way to another scene. Only a script that goes straight
+    on is followed, line by line and into the scripts it calls.
+
+  Parameters:
+
+    [IN]  wFrom - the line after the one that puts the party somewhere.
+
+    [OUT] pdx - how far the steps take the party to the right.
+
+    [OUT] pdy - how far they take it down.
+
+  Return value:
+
+    TRUE if that is where the script leaves the party, FALSE if it cannot be told.
+
+--*/
+{
+   WORD   rgwReturn[MAX_SCRIPT_CALLS];
+   INT    nReturn = 0, nWalked = 0;
+   WORD   w = wFrom;
+
+   *pdx = 0;
+   *pdy = 0;
+
+   while (++nWalked <= MAX_SCRIPT_WALK && w != 0 && w < gpGlobals->g.nScriptEntry)
+   {
+      const SCRIPTENTRY   *p = &gpGlobals->g.lprgScriptEntry[w];
+
+      switch (p->wOperation)
+      {
+      case 0x0002:   // stops, unless it only does so after a while
+         if (p->rgwOperand[1] != 0)
+         {
+            return FALSE;
+         }
+         // fall through
+
+      case 0x0000:   // the end, of the script or of one it has called
+      case 0x0001:
+         if (nReturn == 0)
+         {
+            return TRUE;
+         }
+         w = rgwReturn[--nReturn];
+         continue;
+
+      case 0x0004:   // call
+         if (nReturn >= MAX_SCRIPT_CALLS)
+         {
+            return FALSE;
+         }
+         rgwReturn[nReturn++] = w + 1;
+         w = p->rgwOperand[0];
+         continue;
+
+      case 0x006E:   // one big step from wherever the party is
+         *pdx += (SHORT)p->rgwOperand[0];
+         *pdy += (SHORT)p->rgwOperand[1];
+         break;
+
+      case 0x0046:   // somewhere else again
+      case 0x003F:   // rides and walks
+      case 0x0044:
+      case 0x0097:
+      case 0x0070:
+      case 0x007A:
+      case 0x007B:
+      case 0x007F:   // moves the view
+         return FALSE;
+
+      default:
+         if (TRAINER_JumpOperands(p->wOperation) != 0)
+         {
+            return FALSE;   // may go one way or another
+         }
+         break;
+      }
+
+      w++;
+   }
+
+   return FALSE;
+}
+
 static VOID
 TRAINER_ReadScript(
    WORD                  wEntry,
@@ -565,8 +660,19 @@ TRAINER_ReadScript(
       case 0x0046:
          if (!(pInfo->wFlags & kTrainerScriptMove))
          {
+            INT   dx, dy;
+
             pInfo->xMove = p->rgwOperand[0] * 32 + p->rgwOperand[2] * 16;
             pInfo->yMove = p->rgwOperand[1] * 16 + p->rgwOperand[2] * 8;
+
+            //
+            // A stair climbed on the way leaves the party further on than that.
+            //
+            if (TRAINER_StepsAfter(wCurrent + 1, &dx, &dy))
+            {
+               pInfo->xMove += dx;
+               pInfo->yMove += dy;
+            }
          }
          pInfo->wFlags |= kTrainerScriptMove | kTrainerScriptOther;
          break;

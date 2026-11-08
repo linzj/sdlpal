@@ -231,6 +231,38 @@ TEST_F(TrainerScript, StepFromWhereverThePartyIsEndsSomewhereUnknown) {
     EXPECT_EQ(0, info.wFlags & kTrainerScriptCarryTo);
 }
 
+// The stair up to the young master's room: the party is put at the foot of it and climbs.
+TEST_F(TrainerScript, StairClimbedOnTheWayLeavesThePartyFurtherOn) {
+    line(1, 0x0046, 20, 34, 0);      // the foot of the stair
+    line(2, 0x0004, 10);             // climb it
+    line(3, 0x0059, 123);
+    line(4, 0x0000);
+    line(10, 0x0015, 2);
+    line(11, 0x006E, 10, (WORD)-10);
+    line(12, 0x0009);
+    line(13, 0x006E, 6, (WORD)-6);
+    line(14, 0x0009);
+    line(15, 0x0000);
+
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_EQ(123, info.wScene);
+    EXPECT_EQ(20 * 32 + 16, info.xMove);
+    EXPECT_EQ(34 * 16 - 16, info.yMove);
+}
+
+TEST_F(TrainerScript, StepsThatMayNotBeTakenDoNotCount) {
+    line(1, 0x0046, 20, 34, 0);
+    line(2, 0x0058, 0x70, 1, 10);    // jump if the item is missing
+    line(3, 0x006E, 16, 8);
+    line(4, 0x0059, 3);
+    line(5, 0x0000);
+    line(10, 0x0000);
+
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_EQ(20 * 32, info.xMove);
+    EXPECT_EQ(34 * 16, info.yMove);
+}
+
 TEST_F(TrainerScript, FollowsConditionalJumps) {
     line(1, 0x0058, 0x70, 1, 10);    // jump if the item is missing
     line(2, 0x0000);
