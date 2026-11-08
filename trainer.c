@@ -3984,6 +3984,21 @@ TRAINER_Walk(
    {
       if (!TRAINER_FindRoute(&g_Walk.wHop, 1, &route))
       {
+         WORD wObstacle;
+
+         //
+         // A way out on the way, or a raft, may be behind a gate too: the lever first then,
+         // and the way is planned again once it has been pulled.
+         //
+         if (TRAINER_ObstacleTier() != 0 && !TRAINER_WasTried(g_Walk.wHop) &&
+            TRAINER_FindObstacle(g_Walk.wHop, TRAINER_ObstacleTier(), &wObstacle))
+         {
+            TRAINER_MarkTried(wObstacle);
+            g_Walk.wHop = wObstacle;
+            g_Walk.nStepsLeft = -1;
+            return;
+         }
+
          //
          // No way to it any more: what comes next gets its own count of steps.
          //
