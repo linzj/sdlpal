@@ -1246,7 +1246,9 @@ TRAINER_IsStoryStep(
     Tell whether going up to an event may move the story on: it changes other events, a
     scene or the party, starts a fight, gives something, or takes the party somewhere as
     part of the story. Treasures, monsters and plain exits are for the rest of the trainer.
-    Shops and inns are left out, and so is talk that changes nothing.
+    Shops and inns are left out, and so is talk that changes nothing. Someone the story has
+    the party pay is not: the Taoist who is to drive out the demon from the Liu house asks
+    first, and the choice waits for the player.
 
   Parameters:
 
@@ -1269,9 +1271,13 @@ TRAINER_IsStoryStep(
 
    wFlags = TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags;
 
-   return (wFlags & kTrainerScriptTrade) == 0 &&
-      (wFlags & (kTrainerScriptChange | kTrainerScriptBattle | kTrainerScriptScene |
-         kTrainerScriptItem | kTrainerScriptCash)) != 0;
+   if ((wFlags & kTrainerScriptTrade) != 0)
+   {
+      return (wFlags & (kTrainerScriptChange | kTrainerScriptBattle | kTrainerScriptScene)) != 0;
+   }
+
+   return (wFlags & (kTrainerScriptChange | kTrainerScriptBattle | kTrainerScriptScene |
+      kTrainerScriptItem | kTrainerScriptCash)) != 0;
 }
 
 static VOID
