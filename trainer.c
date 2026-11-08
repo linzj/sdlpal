@@ -30,7 +30,9 @@
 //    as they would for a player, and any key takes back control.
 //    Whoever stands in the way of an exit gets talked to, as that is what moves the story on,
 //    and a lever that opens the way gets pulled. A way that only lets the party through
-//    with something on gets it put on first.
+//    with something on gets it put on first. Treasures behind gates get their levers pulled
+//    too, but nobody gets talked to for them, and those in parts of the scene that only
+//    other scenes lead to are got to through those.
 //  - Puzzles: goes to whatever in the scene an item in the inventory is meant to be used on,
 //    and uses it, the way the hammer breaks the statues around the lake.
 //  - Monsters: walks up to the monsters of the scene and fights them by itself, to level up.
@@ -72,6 +74,8 @@
 #define MAX_STORY_FAILS         3
 #define MAX_LEVERS              256
 #define MAX_SCENE_EVENTS        512
+#define MAX_OBSTACLE_CHAIN      8   // a lever behind a gate behind a gate...
+#define MAX_DETOUR_SCENES       32  // going into other scenes for the treasures of one
 #define MAX_STORY_DECISIONS     64  // in one scene without leaving it: something keeps failing
 #define STORY_DIALOG_SECONDS    2.0f
 
@@ -83,11 +87,13 @@
 #define MIN_DUNGEON_FLOORS      3   // fewer than this is no dungeon, and has no deepest place
 
 // How a route may be found: first without touching any event, and if that fails through
-// monsters and other events that do not move the party away or start a story. The last one
-// is not for walking: it only tells what has to be got past, see TRAINER_FindObstacle().
+// monsters and other events that do not move the party away or start a story. The last two
+// are not for walking: they only tell what has to be got past, see TRAINER_FindObstacle(),
+// either only by pulling levers, or also by going up to people, which may start a story.
 #define TIER_SAFE               1
 #define TIER_THROUGH_MONSTERS   2
-#define TIER_THROUGH_OBSTACLES  3
+#define TIER_THROUGH_LEVERS     3
+#define TIER_THROUGH_OBSTACLES  4
 
 #define START_GRACE_FRAMES      3   // the key that confirmed the menu may still be down
 #define STUCK_FRAMES            30  // something the route did not expect is in the way
@@ -177,6 +183,7 @@ typedef struct tagTRAINERTARGET
    WORD            wEvent;
    INT             iDist;     // -1 if there is no way to get there
    WORD            wObstacle; // what has to be got past first, and iDist is how far that is
+   BOOL            fDetour;   // only by going through other scenes, and iDist is how far
 } TRAINERTARGET;
 
 static struct
@@ -199,6 +206,9 @@ static struct
    INT             nIdleFrames;
    WORD            wHop;         // the raft, teleporter or obstacle on the way to the target, if any
    BOOL            fObstacles;   // go up to what stands in the way, which may start a story
+   BOOL            fLevers;      // pull the levers that open the way, and nothing more
+   WORD            wHome;        // the scene whose treasures these are, if it may go through others
+   INT             nScenes;      // how many times it has gone into another scene for that
 } g_Walk = { kTrainerJobNone, 0, 0, kDirUnknown };
 
 // Moving the story on keeps starting the jobs above, one after another, so what it has to
@@ -227,6 +237,7 @@ static struct
 } g_Story;
 
 static BOOL             g_fWantAnywhere = FALSE;      // look for the events wanted in every scene
+static BOOL             g_fOpenGates = FALSE;         // count the gates whose levers can be reached as open
 
 // The levers of the scenes looked at in this frame, see TRAINER_ListLevers().
 typedef struct tagTRAINERLEVER
@@ -1286,6 +1297,26 @@ TRAINER_FindLever(
    return 0;
 }
 
+static BOOL
+TRAINER_IsLever(
+   WORD           wEventObjectID
+)
+{
+   int   i;
+
+   TRAINER_ListLevers(gpGlobals->wNumScene);
+
+   for (i = 0; i < g_nLever; i++)
+   {
+      if (g_rgLever[i].wScene == gpGlobals->wNumScene && g_rgLever[i].wLever == wEventObjectID)
+      {
+         return TRUE;
+      }
+   }
+
+   return FALSE;
+}
+
 static VOID
 TRAINER_BuildZones(
    const WORD    *rgwTarget,
@@ -1296,8 +1327,9 @@ TRAINER_BuildZones(
   Purpose:
 
     List the places around the events of the current scene that a route has to stay out of.
-    With TIER_THROUGH_OBSTACLES those it may be possible to get past go to g_rgObstacle,
-    along with what to go up to for that.
+    With TIER_THROUGH_LEVERS the gates that a lever of the scene opens go to g_rgObstacle,
+    along with the lever, and with TIER_THROUGH_OBSTACLES whoever may let the party through
+    once they have had their say as well.
 
   Parameters:
 
@@ -1356,12 +1388,12 @@ TRAINER_BuildZones(
          iRadius = TOUCH_RADIUS(p);
       }
 
-      if (iRadius > 0 && iTier >= TIER_THROUGH_OBSTACLES && !fIsTarget && g_nObstacle < MAX_TARGETS)
+      if (iRadius > 0 && iTier >= TIER_THROUGH_LEVERS && !fIsTarget && g_nObstacle < MAX_TARGETS)
       {
          //
          // What to go up to: the event itself, or a lever somewhere else that clears it.
          //
-         wWho = TRAINER_CanBeGotPast((WORD)id) ? (WORD)id : 0;
+         wWho = (iTier >= TIER_THROUGH_OBSTACLES && TRAINER_CanBeGotPast((WORD)id)) ? (WORD)id : 0;
 
          if (wWho == 0 && p->sState >= kObjStateBlocker)
          {
@@ -1692,15 +1724,17 @@ TRAINER_ObstacleAt(
 }
 
 static BOOL
-TRAINER_FindObstacle(
+TRAINER_FindFirstObstacle(
    WORD           wTarget,
+   INT            iTier,
    WORD          *pwObstacle
 )
 /*++
   Purpose:
 
     Find what to go up to for getting to an event there is no route to: the first thing on
-    the way that may let the party through once it has had its say.
+    the way that may let the party through once it has had its say, or the lever that
+    opens it. That may not be any easier to get to, see TRAINER_FindObstacle().
 
     The way is the one past as few of those as possible, with a breadth-first search that
     only goes past one more when there is nowhere else left to go. People in a crowd can
@@ -1709,6 +1743,8 @@ TRAINER_FindObstacle(
   Parameters:
 
     [IN]  wTarget - the event to get to.
+
+    [IN]  iTier - TIER_THROUGH_LEVERS, or TIER_THROUGH_OBSTACLES to go up to people too.
 
     [OUT] pwObstacle - what to go up to.
 
@@ -1736,7 +1772,7 @@ TRAINER_FindObstacle(
       return FALSE;
    }
 
-   TRAINER_BuildZones(&wTarget, 1, TIER_THROUGH_OBSTACLES);
+   TRAINER_BuildZones(&wTarget, 1, iTier);
 
    memset(rgbState, kUnvisited, sizeof(rgbState));
    rgbState[iStart] = kVisited;
@@ -1819,6 +1855,120 @@ TRAINER_FindObstacle(
    }
 
    return FALSE;
+}
+
+static VOID
+TRAINER_ReachableWithLevers(
+   const WORD    *rgwTarget,
+   INT            nTarget,
+   BOOL          *rgfReach
+);
+
+static BOOL
+TRAINER_LeverAtHand(
+   WORD           wTarget,
+   WORD          *pwLever
+)
+/*++
+  Purpose:
+
+    Find the nearest lever of the current scene that can be got to now and still opens
+    something, if pulling such levers one after another gets the party to an event.
+
+  Parameters:
+
+    [IN]  wTarget - the event to get to.
+
+    [OUT] pwLever - the lever.
+
+  Return value:
+
+    TRUE if there is such a lever.
+
+--*/
+{
+   TRAINERROUTE   route;
+   BOOL           fReach = FALSE;
+   INT            i, iBest = 0;
+   WORD           wLever;
+
+   TRAINER_ReachableWithLevers(&wTarget, 1, &fReach);
+
+   if (!fReach)
+   {
+      return FALSE;
+   }
+
+   *pwLever = 0;
+   TRAINER_ListLevers(gpGlobals->wNumScene);
+
+   for (i = 0; i < g_nLever; i++)
+   {
+      wLever = g_rgLever[i].wLever;
+
+      if (g_rgLever[i].wScene == gpGlobals->wNumScene && EVENT(g_rgLever[i].wBlocker)->sState >= kObjStateBlocker &&
+         !(g_Walk.job != kTrainerJobNone && TRAINER_WasTried(wLever)) &&
+         TRAINER_FindRoute(&wLever, 1, &route) && (*pwLever == 0 || route.iDist < iBest))
+      {
+         *pwLever = wLever;
+         iBest = route.iDist;
+      }
+   }
+
+   return *pwLever != 0;
+}
+
+static BOOL
+TRAINER_FindObstacle(
+   WORD           wTarget,
+   INT            iTier,
+   WORD          *pwObstacle
+)
+/*++
+  Purpose:
+
+    Find what to go up to for getting to an event there is no route to, that can be got to
+    now: the lever of the gate in the way may be behind another gate, and so on.
+
+  Parameters:
+
+    [IN]  wTarget - the event to get to.
+
+    [IN]  iTier - TIER_THROUGH_LEVERS, or TIER_THROUGH_OBSTACLES to go up to people too.
+
+    [OUT] pwObstacle - what to go up to.
+
+  Return value:
+
+    TRUE if there is something to go up to.
+
+--*/
+{
+   TRAINERROUTE   route;
+   WORD           w = wTarget, wObstacle;
+   INT            i;
+
+   for (i = 0; i < MAX_OBSTACLE_CHAIN; i++)
+   {
+      if (!TRAINER_FindFirstObstacle(w, iTier, &wObstacle) || wObstacle == w)
+      {
+         break;   // a lever behind the gate it opens is no use
+      }
+
+      if (TRAINER_FindRoute(&wObstacle, 1, &route))
+      {
+         *pwObstacle = wObstacle;
+         return TRUE;
+      }
+
+      w = wObstacle;
+   }
+
+   //
+   // The way past the fewest gates is not always the one whose levers can be got to. If
+   // pulling the levers at hand gets the party there in the end, any of them is a start.
+   //
+   return TRAINER_LeverAtHand(wTarget, pwObstacle);
 }
 
 
@@ -2133,8 +2283,9 @@ TRAINER_FloodScene(
     Find all the ways out that the party can walk to from a position in any scene, and how
     far they are, see TRAINER_FloodOnce().
 
-    When moving the story on, a gate counts as open once its lever can be reached, and then
-    the party may get further, to more levers. The distances leave out going to the levers.
+    When moving the story on, or with g_fOpenGates, a gate counts as open once its lever can
+    be reached, and then the party may get further, to more levers. The distances leave out
+    going to the levers.
 
   Parameters:
 
@@ -2156,7 +2307,7 @@ TRAINER_FloodScene(
    BOOL          fAgain = TRUE;
    int           id, i;
 
-   if (!g_Story.fActive || LAST_EVENT_OF(wScene) - FIRST_EVENT_OF(wScene) >= MAX_SCENE_EVENTS)
+   if (!(g_Story.fActive || g_fOpenGates) || LAST_EVENT_OF(wScene) - FIRST_EVENT_OF(wScene) >= MAX_SCENE_EVENTS)
    {
       TRAINER_FloodOnce(wScene, lpMap, xStart, yStart, NULL);
       return;
@@ -2669,6 +2820,162 @@ TRAINER_PlanHop(
 }
 
 static WORD
+TRAINER_FirstWayTo(
+   INT            iNode
+)
+/*++
+  Purpose:
+
+    Find the way out of the place the party is in that the plan to a place starts with.
+
+  Parameters:
+
+    [IN]  iNode - the place, other than where the party is.
+
+  Return value:
+
+    The way out.
+
+--*/
+{
+   while (g_rgNode[iNode].iFrom > 0)
+   {
+      iNode = g_rgNode[iNode].iFrom;
+   }
+
+   return g_rgNode[iNode].wEvent;
+}
+
+static VOID
+TRAINER_ReachableWithLevers(
+   const WORD    *rgwTarget,
+   INT            nTarget,
+   BOOL          *rgfReach
+)
+/*++
+  Purpose:
+
+    Tell which of some events of the current scene the party can get to from where it is
+    by pulling the levers it can get to, one after another. The first gate on the way may
+    open with a lever at hand, and the next one only with a lever on its far side.
+
+  Parameters:
+
+    [IN]  rgwTarget - the events.
+
+    [IN]  nTarget - the number of those events.
+
+    [OUT] rgfReach - for each of them, whether it can be got to.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   INT   i, j;
+
+   g_nWant = 0;
+
+   for (i = 0; i < nTarget && g_nWant < MAX_TARGETS; i++)
+   {
+      g_rgWant[g_nWant].wEvent = rgwTarget[i];
+      g_rgWant[g_nWant].iNode = -1;
+      g_rgWant[g_nWant].iSteps = 0;
+      g_nWant++;
+   }
+
+   g_fOpenGates = TRUE;
+   TRAINER_Explore(0, FALSE);
+   g_fOpenGates = FALSE;
+
+   for (i = 0; i < nTarget; i++)
+   {
+      rgfReach[i] = FALSE;
+
+      for (j = 0; j < g_nWant; j++)
+      {
+         if (g_rgWant[j].wEvent == rgwTarget[i] && g_rgWant[j].iNode == 0)
+         {
+            rgfReach[i] = TRUE;
+         }
+      }
+   }
+
+   g_nWant = 0;
+}
+
+static BOOL
+TRAINER_PlanDetour(
+   const WORD    *rgwTarget,
+   INT            nTarget,
+   WORD          *pwHop,
+   WORD          *pwChosen
+)
+/*++
+  Purpose:
+
+    Find the way to the nearest one of some events, in another scene or in a part of the
+    current one that only other scenes lead to, through as many scenes as it takes and the
+    levers on the way. Only the first way out is told: the party takes it, and the rest is
+    planned again from where it comes out.
+
+  Parameters:
+
+    [IN]  rgwTarget - the events, all of one scene.
+
+    [IN]  nTarget - the number of those events.
+
+    [OUT] pwHop - the way out to take now, 0 if the event can be got to from here by pulling
+                  the levers at hand.
+
+    [OUT] pwChosen - the event that leads to.
+
+  Return value:
+
+    TRUE if there is a way.
+
+--*/
+{
+   INT   i, iBest = -1;
+
+   g_nWant = 0;
+
+   for (i = 0; i < nTarget && g_nWant < MAX_TARGETS; i++)
+   {
+      g_rgWant[g_nWant].wEvent = rgwTarget[i];
+      g_rgWant[g_nWant].iNode = -1;
+      g_rgWant[g_nWant].iSteps = 0;
+      g_nWant++;
+   }
+
+   g_fWantAnywhere = TRUE;
+   g_fWantNearest = TRUE;
+   g_fOpenGates = TRUE;
+   TRAINER_Explore(0, FALSE);
+   g_fWantAnywhere = FALSE;
+   g_fWantNearest = FALSE;
+   g_fOpenGates = FALSE;
+
+   for (i = 0; i < g_nWant; i++)
+   {
+      if (g_rgWant[i].iNode >= 0 && (iBest < 0 || g_rgWant[i].iSteps < g_rgWant[iBest].iSteps))
+      {
+         iBest = i;
+      }
+   }
+
+   if (iBest >= 0)
+   {
+      *pwChosen = g_rgWant[iBest].wEvent;
+      *pwHop = (g_rgWant[iBest].iNode == 0) ? 0 : TRAINER_FirstWayTo(g_rgWant[iBest].iNode);
+   }
+
+   g_nWant = 0;
+   return iBest >= 0;
+}
+
+static WORD
 TRAINER_FindDeepestScene(
    VOID
 )
@@ -2901,6 +3208,87 @@ TRAINER_EndCollect(
    TRAINER_EndJob(szText);
 }
 
+static INT
+TRAINER_ObstacleTier(
+   VOID
+)
+/*++
+  Purpose:
+
+    Tell how far the job goes to get past what stands in the way.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    TIER_THROUGH_OBSTACLES, TIER_THROUGH_LEVERS, or 0 for not at all.
+
+--*/
+{
+   return g_Walk.fObstacles ? TIER_THROUGH_OBSTACLES : (g_Walk.fLevers ? TIER_THROUGH_LEVERS : 0);
+}
+
+static BOOL
+TRAINER_NearestPastObstacle(
+   const WORD    *rgwTarget,
+   INT            nTarget,
+   INT            iTier,
+   WORD          *pwChosen
+)
+/*++
+  Purpose:
+
+    Find the event among some that is nearest to get to by going up to what is in its way
+    first.
+
+  Parameters:
+
+    [IN]  rgwTarget - the events.
+
+    [IN]  nTarget - the number of those events.
+
+    [IN]  iTier - TIER_THROUGH_LEVERS or TIER_THROUGH_OBSTACLES, see TRAINER_FindObstacle().
+
+    [OUT] pwChosen - the event chosen.
+
+  Return value:
+
+    TRUE if any of them can be got to that way.
+
+--*/
+{
+   TRAINERROUTE   route;
+   WORD           wObstacle;
+   INT            i, iBest = 0;
+   BOOL           rgfReach[MAX_TARGETS];
+
+   *pwChosen = 0;
+
+   //
+   // Pulling a lever for what the next gate keeps out anyway is no use. People may well do
+   // more than a lever, so there is no telling for them.
+   //
+   if (iTier == TIER_THROUGH_LEVERS)
+   {
+      TRAINER_ReachableWithLevers(rgwTarget, (nTarget < MAX_TARGETS) ? nTarget : MAX_TARGETS, rgfReach);
+   }
+
+   for (i = 0; i < nTarget && i < MAX_TARGETS; i++)
+   {
+      if ((iTier != TIER_THROUGH_LEVERS || rgfReach[i]) &&
+         TRAINER_FindObstacle(rgwTarget[i], iTier, &wObstacle) &&
+         TRAINER_FindRoute(&wObstacle, 1, &route) && (*pwChosen == 0 || route.iDist < iBest))
+      {
+         *pwChosen = rgwTarget[i];
+         iBest = route.iDist;
+      }
+   }
+
+   return *pwChosen != 0;
+}
+
 static VOID
 TRAINER_ChooseNextTreasure(
    VOID
@@ -2909,6 +3297,8 @@ TRAINER_ChooseNextTreasure(
   Purpose:
 
     Go on to the nearest treasure not tried yet, or finish when there is no such thing.
+    With g_Walk.wHome, those are the treasures of that scene, and the way to them may go
+    through other scenes.
 
   Parameters:
 
@@ -2920,13 +3310,15 @@ TRAINER_ChooseNextTreasure(
 
 --*/
 {
+   const WORD     wScene = (g_Walk.wHome != 0) ? g_Walk.wHome : gpGlobals->wNumScene;
+   const BOOL     fHere = (wScene == gpGlobals->wNumScene);
    WORD           rgwTarget[MAX_TARGETS];
    INT            nTarget = 0;
    int            id;
    TRAINERROUTE   route;
    WORD           wHop, wChosen;
 
-   for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT() && nTarget < MAX_TARGETS; id++)
+   for (id = FIRST_EVENT_OF(wScene); id <= LAST_EVENT_OF(wScene) && nTarget < MAX_TARGETS; id++)
    {
       if (TRAINER_IsTreasure((WORD)id) && !TRAINER_WasTried((WORD)id))
       {
@@ -2938,12 +3330,27 @@ TRAINER_ChooseNextTreasure(
    {
       TRAINER_EndCollect();
    }
-   else if (TRAINER_FindRoute(rgwTarget, nTarget, &route))
+   else if (fHere && TRAINER_FindRoute(rgwTarget, nTarget, &route))
    {
       g_Walk.wTarget = route.wTarget;
       g_Walk.nStepsLeft = -1;
    }
-   else if (TRAINER_PlanHop(rgwTarget, nTarget, &wHop, &wChosen))
+   else if (fHere && TRAINER_PlanHop(rgwTarget, nTarget, &wHop, &wChosen))
+   {
+      g_Walk.wTarget = wChosen;
+      g_Walk.wHop = wHop;
+      g_Walk.nStepsLeft = -1;
+   }
+   else if (fHere && TRAINER_ObstacleTier() != 0 &&
+      TRAINER_NearestPastObstacle(rgwTarget, nTarget, TRAINER_ObstacleTier(), &wChosen))
+   {
+      //
+      // The walk goes up to what is in the way first, see TRAINER_Walk().
+      //
+      g_Walk.wTarget = wChosen;
+      g_Walk.nStepsLeft = -1;
+   }
+   else if (g_Walk.wHome != 0 && TRAINER_PlanDetour(rgwTarget, nTarget, &wHop, &wChosen))
    {
       g_Walk.wTarget = wChosen;
       g_Walk.wHop = wHop;
@@ -3371,7 +3778,7 @@ TRAINER_FailTarget(
       TRAINER_MarkTried(g_Walk.wTarget);
       g_Walk.wTarget = 0;
    }
-   else if (g_Walk.fObstacles && g_Walk.nTried > 0)
+   else if ((g_Walk.fObstacles || g_Walk.fLevers) && g_Walk.nTried > 0)
    {
       TRAINER_EndJob(TR("阻礙還在，暫時過不去", "阻碍还在，暂时过不去"));
    }
@@ -3515,6 +3922,23 @@ TRAINER_Walk(
       g_Walk.nStepsLeft = -1;
    }
 
+   //
+   // A treasure of the scene the party set out from: on to the next way out there first.
+   //
+   if (g_Walk.wHome != 0 && g_Walk.wHop == 0 && TRAINER_SceneOf(g_Walk.wTarget) != gpGlobals->wNumScene)
+   {
+      WORD wHop, wChosen;
+
+      if (!TRAINER_PlanDetour(&g_Walk.wTarget, 1, &wHop, &wChosen) || wHop == 0)
+      {
+         TRAINER_FailTarget();
+         return;
+      }
+
+      g_Walk.wHop = wHop;
+      g_Walk.nStepsLeft = -1;
+   }
+
    if (g_Walk.wHop == 0 && !TRAINER_FindRoute(&g_Walk.wTarget, 1, &route))
    {
       WORD wHop, wChosen;
@@ -3534,14 +3958,17 @@ TRAINER_Walk(
          //
          // Is there something in the way? Going up to it is the one thing left to try, and
          // only once: what it says may well be that the party has to come back later.
+         // Some parts of a scene are only to be got to through other scenes, though.
          //
-         if (!g_Walk.fObstacles || !TRAINER_FindObstacle(g_Walk.wTarget, &wHop))
+         if (TRAINER_ObstacleTier() != 0 && TRAINER_FindObstacle(g_Walk.wTarget, TRAINER_ObstacleTier(), &wHop))
+         {
+            TRAINER_MarkTried(wHop);
+         }
+         else if (g_Walk.wHome == 0 || !TRAINER_PlanDetour(&g_Walk.wTarget, 1, &wHop, &wChosen) || wHop == 0)
          {
             TRAINER_FailTarget();
             return;
          }
-
-         TRAINER_MarkTried(wHop);
       }
 
       g_Walk.wHop = wHop;
@@ -3834,33 +4261,6 @@ TRAINER_StartStoryJob(
    g_Walk.nFrames = START_GRACE_FRAMES + 1;   // no key confirms this one
 }
 
-static WORD
-TRAINER_FirstWayTo(
-   INT            iNode
-)
-/*++
-  Purpose:
-
-    Find the way out of the place the party is in that the plan to a place starts with.
-
-  Parameters:
-
-    [IN]  iNode - the place, other than where the party is.
-
-  Return value:
-
-    The way out.
-
---*/
-{
-   while (g_rgNode[iNode].iFrom > 0)
-   {
-      iNode = g_rgNode[iNode].iFrom;
-   }
-
-   return g_rgNode[iNode].wEvent;
-}
-
 static VOID
 TRAINER_SetPending(
    WORD           wEventObjectID,
@@ -3875,17 +4275,19 @@ TRAINER_SetPending(
 
 static BOOL
 TRAINER_StoryHere(
-   VOID
+   BOOL         (*lpfnFilter)(WORD)
 )
 /*++
   Purpose:
 
-    Go up to the nearest thing in the current scene that may move the story on, past what
-    stands in the way if need be. Each of them gets one go as it is.
+    Go up to the nearest event of some kind in the current scene that can be got to now,
+    past what stands in the way if need be: the treasures, or whatever may move the story
+    on. Each of them gets one go as it is, once the party has got there. What cannot be got
+    to now is looked at again the next time, as a lever pulled since may have opened the way.
 
   Parameters:
 
-    None.
+    [IN]  lpfnFilter - tells which events to go to.
 
   Return value:
 
@@ -3894,14 +4296,14 @@ TRAINER_StoryHere(
 --*/
 {
    WORD           rgwTarget[MAX_TARGETS];
-   INT            nTarget = 0, i, iBest = 0;
+   INT            nTarget = 0;
    int            id;
    TRAINERROUTE   route;
-   WORD           wHop, wChosen = 0, wObstacle;
+   WORD           wHop, wChosen = 0;
 
    for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT() && nTarget < MAX_TARGETS; id++)
    {
-      if (TRAINER_IsStoryStep((WORD)id) && !TRAINER_StoryTried((WORD)id) && !TRAINER_StoryFailed((WORD)id))
+      if (lpfnFilter((WORD)id) && !TRAINER_StoryTried((WORD)id) && !TRAINER_StoryFailed((WORD)id))
       {
          rgwTarget[nTarget++] = (WORD)id;
       }
@@ -3918,17 +4320,7 @@ TRAINER_StoryHere(
    }
    else if (!TRAINER_PlanHop(rgwTarget, nTarget, &wHop, &wChosen))
    {
-      wChosen = 0;
-
-      for (i = 0; i < nTarget; i++)
-      {
-         if (TRAINER_FindObstacle(rgwTarget[i], &wObstacle) && TRAINER_FindRoute(&wObstacle, 1, &route) &&
-            (wChosen == 0 || route.iDist < iBest))
-         {
-            wChosen = rgwTarget[i];
-            iBest = route.iDist;
-         }
-      }
+      TRAINER_NearestPastObstacle(rgwTarget, nTarget, TIER_THROUGH_OBSTACLES, &wChosen);
    }
 
    if (wChosen == 0)
@@ -4073,6 +4465,8 @@ TRAINER_NextStoryStep(
     Decide what to do next for moving the story on, and start doing it: the treasures and
     puzzles of the scene first, then whatever in it may move the story on, then the nearest
     such thing anywhere, then the deepest place of the dungeon, then scenes not seen yet.
+    Being decided again after each of them, a treasure that a lever has opened the way to
+    gets its turn.
 
   Parameters:
 
@@ -4086,7 +4480,6 @@ TRAINER_NextStoryStep(
 {
    WORD   wMissing, wDeepest;
    INT    i, n = 0;
-   int    id;
 
    g_Story.wGoal = 0;
    TRAINER_ForgetLevers();
@@ -4122,20 +4515,11 @@ TRAINER_NextStoryStep(
    ADD_SCENE_TO_SET(g_Story.rgbVisited, gpGlobals->wNumScene);
 
    //
-   // The treasures and puzzles of the scene, all of them in one go each.
+   // The treasures that can be got to now, one after another, and the puzzles of the scene
+   // in one go.
    //
-   for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT(); id++)
+   if (TRAINER_StoryHere(TRAINER_IsTreasure))
    {
-      if (TRAINER_IsTreasure((WORD)id) && !TRAINER_StoryTried((WORD)id))
-      {
-         TRAINER_MarkStoryTried((WORD)id);
-         n++;
-      }
-   }
-
-   if (n > 0)
-   {
-      TRAINER_StartStoryJob(kTrainerJobCollect, 0);
       return;
    }
 
@@ -4156,7 +4540,7 @@ TRAINER_NextStoryStep(
       return;
    }
 
-   if (TRAINER_StoryHere() || TRAINER_StoryElsewhere())
+   if (TRAINER_StoryHere(TRAINER_IsStoryStep) || TRAINER_StoryElsewhere())
    {
       return;
    }
@@ -4198,6 +4582,8 @@ TRAINER_Update(
 
 --*/
 {
+   INT   i, n;
+
    if (g_wCurrentScene != gpGlobals->wNumScene)
    {
       g_wPreviousScene = g_wCurrentScene;
@@ -4227,7 +4613,7 @@ TRAINER_Update(
 
    if (gpGlobals->wNumScene != g_Walk.wScene)
    {
-      if (g_Walk.job != kTrainerJobRoute)
+      if (g_Walk.job != kTrainerJobRoute && g_Walk.wHome == 0)
       {
          //
          // Either the exit asked for, or something on the way did this.
@@ -4236,11 +4622,34 @@ TRAINER_Update(
          return;
       }
 
+      if (g_Walk.wHome != 0 && ++g_Walk.nScenes > MAX_DETOUR_SCENES)
+      {
+         TRAINER_EndJob(TR("繞路太遠，已停止", "绕路太远，已停止"));
+         return;
+      }
+
+      //
+      // A treasure walked to through other scenes stays the one to get.
+      //
       g_Walk.wScene = gpGlobals->wNumScene;
-      g_Walk.wTarget = 0;
+      g_Walk.wTarget = (g_Walk.job == kTrainerJobWalk) ? g_Walk.wTarget : 0;
       g_Walk.wHop = 0;
-      g_Walk.nTried = 0;
       g_Walk.posLast = PAL_XY(-1, -1);
+
+      //
+      // What has failed in the scene the treasures are in stays failed, or the party would
+      // go back and forth for it. The ways tried elsewhere may work from another side.
+      //
+      for (i = 0, n = 0; i < g_Walk.nTried; i++)
+      {
+         if (g_Walk.wHome != 0 && g_Walk.rgwTried[i] >= FIRST_EVENT_OF(g_Walk.wHome) &&
+            g_Walk.rgwTried[i] <= LAST_EVENT_OF(g_Walk.wHome))
+         {
+            g_Walk.rgwTried[n++] = g_Walk.rgwTried[i];
+         }
+      }
+
+      g_Walk.nTried = n;
    }
 
    if (++g_Walk.nFrames > START_GRACE_FRAMES &&
@@ -4302,6 +4711,11 @@ TRAINER_DrawOverlay(
       PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR),
          TR("推進劇情：前往場景 %d，按任意鍵停止", "推进剧情：前往场景 %d，按任意键停止"), TRAINER_SceneOf(g_Story.wGoal));
       lpszText = szText;
+   }
+   else if (g_Story.fActive && g_Walk.job == kTrainerJobWalk && g_Walk.wTarget != 0 &&
+      TRAINER_IsTreasure(g_Walk.wTarget))
+   {
+      lpszText = TR("推進劇情：尋寶，按任意鍵停止", "推进剧情：寻宝，按任意键停止");
    }
    else if (g_Story.fActive && (g_Walk.job == kTrainerJobWalk || g_Walk.job == kTrainerJobNone))
    {
@@ -4627,17 +5041,19 @@ TRAINER_TargetDistanceText(
    }
 
    PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR),
-      (pTarget->wObstacle != 0) ? TR("阻礙 %d步", "阻碍 %d步") : L"%d步", pTarget->iDist);
+      pTarget->fDetour ? TR("繞路 %d步", "绕路 %d步") : (pTarget->wObstacle == 0) ? L"%d步" :
+      (TRAINER_IsLever(pTarget->wObstacle) ? TR("機關 %d步", "机关 %d步") : TR("阻礙 %d步", "阻碍 %d步")),
+      pTarget->iDist);
    return szText;
 }
 
 // The order of the list: what can be walked to, then what is behind something, then the rest.
-#define TARGET_RANK(p)          (((p)->iDist < 0) ? 2 : (((p)->wObstacle != 0) ? 1 : 0))
+#define TARGET_RANK(p)          (((p)->iDist < 0) ? 3 : ((p)->fDetour ? 2 : (((p)->wObstacle != 0) ? 1 : 0)))
 
 static VOID
 TRAINER_ListTargets(
    BOOL         (*lpfnFilter)(WORD),
-   BOOL           fObstacles
+   INT            iTier
 )
 /*++
   Purpose:
@@ -4649,7 +5065,8 @@ TRAINER_ListTargets(
 
     [IN]  lpfnFilter - tells which events to list.
 
-    [IN]  fObstacles - TRUE to tell what stands in the way of those out of reach.
+    [IN]  iTier - TIER_THROUGH_LEVERS or TIER_THROUGH_OBSTACLES to tell what stands in
+                  the way of those out of reach and how to get past it, 0 not to.
 
   Return value:
 
@@ -4671,6 +5088,7 @@ TRAINER_ListTargets(
          g_rgTarget[g_nTarget].wEvent = wTarget;
          g_rgTarget[g_nTarget].iDist = TRAINER_FindRoute(&wTarget, 1, &route) ? route.iDist : -1;
          g_rgTarget[g_nTarget].wObstacle = 0;
+         g_rgTarget[g_nTarget].fDetour = FALSE;
          g_nTarget++;
       }
    }
@@ -4709,16 +5127,89 @@ TRAINER_ListTargets(
       g_nWant = 0;
    }
 
-   for (i = 0; i < g_nTarget && fObstacles; i++)
+   //
+   // What only levers stand in the way of, if pulling the ones at hand gets the party there.
+   //
+   if (iTier == TIER_THROUGH_LEVERS)
+   {
+      WORD   rgwOut[MAX_TARGETS];
+      BOOL   rgfReach[MAX_TARGETS];
+      INT    nOut = 0;
+
+      for (i = 0; i < g_nTarget; i++)
+      {
+         if (g_rgTarget[i].iDist < 0)
+         {
+            rgwOut[nOut++] = g_rgTarget[i].wEvent;
+         }
+      }
+
+      TRAINER_ReachableWithLevers(rgwOut, nOut, rgfReach);
+
+      for (i = 0, j = 0; i < g_nTarget; i++)
+      {
+         if (g_rgTarget[i].iDist < 0)
+         {
+            g_rgTarget[i].wObstacle = rgfReach[j++] ? 0 : 0xFFFF;   // 0xFFFF: not even so
+         }
+      }
+   }
+
+   for (i = 0; i < g_nTarget && iTier != 0; i++)
    {
       TRAINERROUTE   route;
       WORD           wObstacle;
+      const BOOL     fHopeless = (g_rgTarget[i].wObstacle == 0xFFFF);
 
-      if (g_rgTarget[i].iDist < 0 && TRAINER_FindObstacle(g_rgTarget[i].wEvent, &wObstacle) &&
+      g_rgTarget[i].wObstacle = 0;
+
+      if (g_rgTarget[i].iDist < 0 && !fHopeless && TRAINER_FindObstacle(g_rgTarget[i].wEvent, iTier, &wObstacle) &&
          TRAINER_FindRoute(&wObstacle, 1, &route))
       {
          g_rgTarget[i].iDist = route.iDist;
          g_rgTarget[i].wObstacle = wObstacle;
+      }
+   }
+
+   //
+   // Treasures in parts of the scene that only other scenes lead to, and how far that is.
+   //
+   if (iTier == TIER_THROUGH_LEVERS)
+   {
+      g_nWant = 0;
+
+      for (i = 0; i < g_nTarget && g_nWant < MAX_TARGETS; i++)
+      {
+         if (g_rgTarget[i].iDist < 0)
+         {
+            g_rgWant[g_nWant].wEvent = g_rgTarget[i].wEvent;
+            g_rgWant[g_nWant].iNode = -1;
+            g_rgWant[g_nWant].iSteps = 0;
+            g_nWant++;
+         }
+      }
+
+      if (g_nWant > 0)
+      {
+         g_fWantAnywhere = TRUE;
+         g_fOpenGates = TRUE;
+         TRAINER_Explore(0, FALSE);
+         g_fWantAnywhere = FALSE;
+         g_fOpenGates = FALSE;
+
+         for (i = 0; i < g_nTarget; i++)
+         {
+            for (j = 0; j < g_nWant; j++)
+            {
+               if (g_rgWant[j].wEvent == g_rgTarget[i].wEvent && g_rgWant[j].iNode > 0)
+               {
+                  g_rgTarget[i].iDist = g_rgWant[j].iSteps;
+                  g_rgTarget[i].fDetour = TRUE;
+               }
+            }
+         }
+
+         g_nWant = 0;
       }
    }
 
@@ -4763,7 +5254,7 @@ TRAINER_ListExits(
 
 --*/
 {
-   TRAINER_ListTargets(TRAINER_LeadsElsewhere, TRUE);
+   TRAINER_ListTargets(TRAINER_LeadsElsewhere, TIER_THROUGH_OBSTACLES);
 }
 
 static LPCWSTR
@@ -4825,7 +5316,7 @@ TRAINER_TreasureMenu(
 {
    INT   iCursor = 0, i;
 
-   TRAINER_ListTargets(TRAINER_IsTreasure, FALSE);
+   TRAINER_ListTargets(TRAINER_IsTreasure, TIER_THROUGH_LEVERS);
 
    if (g_nTarget == 0)
    {
@@ -4835,14 +5326,23 @@ TRAINER_TreasureMenu(
 
    i = TRAINER_ListMenu(TR("尋寶", "寻宝"), g_nTarget + 1, 1, &iCursor, TRAINER_TreasureLabel, NULL);
 
+   //
+   // The gates in the way get opened, but nobody gets talked to: that may start a story.
+   // Parts of the scene that only other scenes lead to are got to through those.
+   //
    if (i == 0)
    {
       TRAINER_StartJob(kTrainerJobCollect, 0);
-      return TRUE;
    }
    else if (i > 0)
    {
       TRAINER_StartJob(kTrainerJobWalk, g_rgTarget[i - 1].wEvent);
+   }
+
+   if (i >= 0)
+   {
+      g_Walk.fLevers = TRUE;
+      g_Walk.wHome = gpGlobals->wNumScene;   // even if the way there goes through other scenes
       return TRUE;
    }
 
