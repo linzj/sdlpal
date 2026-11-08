@@ -2781,8 +2781,12 @@ TRAINER_Walk(
    {
       if (!TRAINER_FindRoute(&g_Walk.wHop, 1, &route))
       {
+         //
+         // No way to it any more: what comes next gets its own count of steps.
+         //
          TRAINER_MarkTried(g_Walk.wHop);
          g_Walk.wHop = 0;
+         g_Walk.nStepsLeft = -1;
          return;
       }
 
