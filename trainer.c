@@ -20,6 +20,10 @@
 // The in-game trainer, opened with the T key while walking around a scene, or from the
 // system menu of the game:
 //
+//  - Story: moves the story on by itself, doing what is below one thing after another: the
+//    treasures and puzzles of each scene, whatever in it may move the story on, the nearest
+//    such thing anywhere else, the bottom of the dungeon, then scenes not seen yet.
+//    Meanwhile the pages of dialogs turn by themselves, and choices wait for the player.
 //  - Walking: goes to one treasure or exit of the current scene, or collects every treasure,
 //    or goes through as many scenes as it takes to the deepest place of a dungeon.
 //    It only steers the party the way the arrow keys do, so events and battles still happen
@@ -63,6 +67,13 @@
 #define MAX_SCRIPT_WALK         2048
 #define MAX_SCRIPT_TODO         64
 #define MAX_PUZZLES             32
+#define MAX_STORY_TRIED         1024
+#define MAX_STORY_FAILED        64
+#define MAX_STORY_FAILS         3
+#define MAX_LEVERS              256
+#define MAX_SCENE_EVENTS        512
+#define MAX_STORY_DECISIONS     64  // in one scene without leaving it: something keeps failing
+#define STORY_DIALOG_SECONDS    2.0f
 
 // Planning a route across scenes
 #define MAX_PLAN_NODES          512
@@ -90,6 +101,8 @@
 #define LIST_LINE_HEIGHT        18
 #define LIST_WIDTH              288
 
+#define SCENE_IN_SET(set, s)    (((set)[(s) >> 3] & (1 << ((s) & 7))) != 0)
+#define ADD_SCENE_TO_SET(set, s) ((set)[(s) >> 3] |= (BYTE)(1 << ((s) & 7)))
 #define EVENT(id)               (&gpGlobals->g.lprgEventObject[(id) - 1])
 #define FIRST_EVENT_OF(scene)   (gpGlobals->g.rgScene[(scene) - 1].wEventObjectIndex + 1)
 #define LAST_EVENT_OF(scene)    (gpGlobals->g.rgScene[(scene)].wEventObjectIndex)
@@ -136,6 +149,7 @@ typedef struct tagTRAINEREDGE
    INT             x, y;      // -1 if the script does not tell
    INT             iDist;     // -1 if it cannot be reached
    INT             iRide;     // how far it carries the party, as that takes time too
+   BOOL            fPass;     // a lever: this only tells whether it can be reached
 } TRAINEREDGE;
 
 // A place the party can get to: a scene, and where it arrives there.
@@ -186,6 +200,46 @@ static struct
    WORD            wHop;         // the raft, teleporter or obstacle on the way to the target, if any
    BOOL            fObstacles;   // go up to what stands in the way, which may start a story
 } g_Walk = { kTrainerJobNone, 0, 0, kDirUnknown };
+
+// Moving the story on keeps starting the jobs above, one after another, so what it has to
+// remember lives here and outlasts each of them.
+static struct
+{
+   BOOL            fActive;
+   BYTE            rgbVisited[(MAX_SCENES + 8) / 8];  // the scenes it has been to
+   DWORD           rgdwTried[MAX_STORY_TRIED];        // events, with the script they had then
+   INT             nTried;                            // how many, the oldest go first when full
+   WORD            wScene;                            // where it decided the last time
+   WORD            wGoal;                             // the event in another scene it is heading for
+   INT             nDecisions;                        // how many times in a row it has decided there
+   INT             nFrames;
+   struct
+   {
+      WORD         wEvent;
+      BYTE         nFails;                            // it gets given up after a few
+      BYTE         fNow;                              // failed since the party came into the scene
+   }               rgFailed[MAX_STORY_FAILED];
+   INT             nFailed;
+   WORD            wPending;                          // what it is going for now
+   WORD            wPendingScript;                    // and the script that had
+   BOOL            fPendingStep;                      // something to trigger, not a way to go
+   BOOL            fReached;                          // the walk got there
+} g_Story;
+
+static BOOL             g_fWantAnywhere = FALSE;      // look for the events wanted in every scene
+
+// The levers of the scenes looked at in this frame, see TRAINER_ListLevers().
+typedef struct tagTRAINERLEVER
+{
+   WORD            wScene;
+   WORD            wLever;
+   WORD            wBlocker;  // what it gets out of the way
+} TRAINERLEVER;
+
+static TRAINERLEVER     g_rgLever[MAX_LEVERS];
+static INT              g_nLever;
+static BYTE             g_rgbLevered[(MAX_SCENES + 8) / 8];   // the scenes listed
+static DWORD            g_dwLeverFrame = 0;
 
 static WCHAR            g_szToast[64];
 static INT              g_nToastFrames = 0;
@@ -436,7 +490,33 @@ TRAINER_ReadScript(
       case 0x0005:   // redraw the screen
       case 0x0014:   // change the picture of the event, which opens a chest
       case 0x0047:   // sound
-      case 0x0049:   // hide the event
+         break;
+
+      case 0x0049:   // hide the event, or show or hide another one
+         if (p->rgwOperand[0] != 0 && p->rgwOperand[0] != 0xFFFF)
+         {
+            pInfo->wFlags |= kTrainerScriptChange;
+         }
+         break;
+
+      case 0x0024:   // the scripts of an event
+      case 0x0025:
+      case 0x0040:   // how an event gets triggered
+      case 0x0055:   // magics
+      case 0x0056:
+      case 0x006D:   // the scripts of a scene
+      case 0x0075:   // who is in the party
+      case 0x008D:   // levels
+      case 0x0090:   // the script of an object
+      case 0x0098:   // who follows the party
+      case 0x0099:   // the map of a scene
+      case 0x009A:   // the state of several events
+         pInfo->wFlags |= kTrainerScriptChange | kTrainerScriptOther;
+         break;
+
+      case 0x0026:   // shops
+      case 0x0027:
+         pInfo->wFlags |= kTrainerScriptTrade | kTrainerScriptOther;
          break;
 
       case 0x001E:
@@ -451,7 +531,7 @@ TRAINER_ReadScript(
          }
          else
          {
-            pInfo->wFlags |= kTrainerScriptOther;   // this one takes money
+            pInfo->wFlags |= kTrainerScriptTrade | kTrainerScriptOther;   // this one takes money
          }
          break;
 
@@ -868,6 +948,128 @@ TRAINER_WasTried(
 }
 
 static BOOL
+TRAINER_StoryTried(
+   WORD           wEventObjectID
+)
+/*++
+  Purpose:
+
+    Tell whether moving the story on has already had a go at an event as it is now. Once
+    its script has changed, it may well do something else.
+
+  Parameters:
+
+    [IN]  wEventObjectID - the event.
+
+  Return value:
+
+    TRUE if it has been tried.
+
+--*/
+{
+   const DWORD   dw = ((DWORD)wEventObjectID << 16) | EVENT(wEventObjectID)->wTriggerScript;
+   int           i;
+
+   for (i = 0; i < g_Story.nTried && i < MAX_STORY_TRIED; i++)
+   {
+      if (g_Story.rgdwTried[i] == dw)
+      {
+         return TRUE;
+      }
+   }
+
+   return FALSE;
+}
+
+static VOID
+TRAINER_AddStoryTried(
+   WORD           wEventObjectID,
+   WORD           wScript
+)
+{
+   const DWORD   dw = ((DWORD)wEventObjectID << 16) | wScript;
+   int           i;
+
+   for (i = 0; i < g_Story.nTried && i < MAX_STORY_TRIED; i++)
+   {
+      if (g_Story.rgdwTried[i] == dw)
+      {
+         return;
+      }
+   }
+
+   g_Story.rgdwTried[g_Story.nTried % MAX_STORY_TRIED] = dw;
+   g_Story.nTried++;
+}
+
+static VOID
+TRAINER_MarkStoryTried(
+   WORD           wEventObjectID
+)
+{
+   TRAINER_AddStoryTried(wEventObjectID, EVENT(wEventObjectID)->wTriggerScript);
+}
+
+static BOOL
+TRAINER_StoryFailed(
+   WORD           wEventObjectID
+)
+/*++
+  Purpose:
+
+    Tell whether moving the story on is to leave an event alone, as going to it has failed:
+    since the party came into the scene, or too many times. Whether it can be got to depends
+    on where the party comes from, so one failure is not for good.
+
+  Parameters:
+
+    [IN]  wEventObjectID - the event.
+
+  Return value:
+
+    TRUE if it is to be left alone.
+
+--*/
+{
+   int   i;
+
+   for (i = 0; i < g_Story.nFailed; i++)
+   {
+      if (g_Story.rgFailed[i].wEvent == wEventObjectID)
+      {
+         return g_Story.rgFailed[i].fNow || g_Story.rgFailed[i].nFails >= MAX_STORY_FAILS;
+      }
+   }
+
+   return FALSE;
+}
+
+static VOID
+TRAINER_MarkStoryFailed(
+   WORD           wEventObjectID
+)
+{
+   int   i;
+
+   for (i = 0; i < g_Story.nFailed && g_Story.rgFailed[i].wEvent != wEventObjectID; i++);
+
+   if (i == g_Story.nFailed)
+   {
+      if (g_Story.nFailed >= MAX_STORY_FAILED)
+      {
+         return;
+      }
+
+      g_Story.rgFailed[i].wEvent = wEventObjectID;
+      g_Story.rgFailed[i].nFails = 0;
+      g_Story.nFailed++;
+   }
+
+   g_Story.rgFailed[i].nFails++;
+   g_Story.rgFailed[i].fNow = TRUE;
+}
+
+static BOOL
 TRAINER_CanBeGotPast(
    WORD           wEventObjectID
 )
@@ -903,38 +1105,113 @@ TRAINER_CanBeGotPast(
 }
 
 static WORD
-TRAINER_FindLever(
-   WORD           wBlocker
+TRAINER_SceneOf(
+   WORD           wEventObjectID
+)
+{
+   WORD   s;
+
+   for (s = 1; s < MAX_SCENES - 1 && LAST_EVENT_OF(s) < wEventObjectID; s++);
+
+   return s;
+}
+
+static BOOL
+TRAINER_IsStoryStep(
+   WORD           wEventObjectID
 )
 /*++
   Purpose:
 
-    Find a lever in the current scene that gets something out of the way, as the ones that
-    open the gates of the tomb: triggering it does nothing else a player has to be there for.
+    Tell whether going up to an event may move the story on: it changes other events, a
+    scene or the party, starts a fight, gives something, or takes the party somewhere as
+    part of the story. Treasures, monsters and plain exits are for the rest of the trainer.
+    Shops and inns are left out, and so is talk that changes nothing.
 
   Parameters:
 
-    [IN]  wBlocker - what is in the way.
+    [IN]  wEventObjectID - the event.
 
   Return value:
 
-    The lever, or 0 if there is none.
+    TRUE if the event may move the story on.
+
+--*/
+{
+   const EVENTOBJECT   *p = EVENT(wEventObjectID);
+   WORD                 wFlags;
+
+   if (!EVENT_IS_ACTIVE(p) || p->wTriggerMode == kTriggerNone || p->wTriggerScript == 0 ||
+      TRAINER_IsTreasure(wEventObjectID) || TRAINER_HasMonsterScript(p) || TRAINER_IsWayOut(p))
+   {
+      return FALSE;
+   }
+
+   wFlags = TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags;
+
+   return (wFlags & kTrainerScriptTrade) == 0 &&
+      (wFlags & (kTrainerScriptChange | kTrainerScriptBattle | kTrainerScriptScene |
+         kTrainerScriptItem | kTrainerScriptCash)) != 0;
+}
+
+static VOID
+TRAINER_ForgetLevers(
+   VOID
+)
+{
+   g_nLever = 0;
+   memset(g_rgbLevered, 0, sizeof(g_rgbLevered));
+}
+
+static VOID
+TRAINER_ListLevers(
+   WORD           wScene
+)
+/*++
+  Purpose:
+
+    List the levers of a scene and what they get out of the way, as the ones that open the
+    gates of the tomb: triggering one does nothing else a player has to be there for.
+
+    Planning floods the same scenes again and again, so the list is kept for as long as
+    nothing can have changed: the rest of the frame, see TRAINER_ForgetLevers().
+
+  Parameters:
+
+    [IN]  wScene - the scene.
+
+  Return value:
+
+    None. The levers are in g_rgLever.
 
 --*/
 {
    static BYTE   rgbSeen[65536 / 8];
    int           id;
 
-   for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT(); id++)
+   if (gpGlobals->dwFrameNum != g_dwLeverFrame)
+   {
+      TRAINER_ForgetLevers();
+      g_dwLeverFrame = gpGlobals->dwFrameNum;
+   }
+
+   if (wScene >= MAX_SCENES || SCENE_IN_SET(g_rgbLevered, wScene))
+   {
+      return;
+   }
+
+   ADD_SCENE_TO_SET(g_rgbLevered, wScene);
+
+   for (id = FIRST_EVENT_OF(wScene); id <= LAST_EVENT_OF(wScene); id++)
    {
       const EVENTOBJECT   *p = EVENT(id);
       WORD                 rgwTodo[MAX_SCRIPT_TODO];
       INT                  nTodo = 0, nWalked = 0;
 
-      if (id == wBlocker || !EVENT_IS_ACTIVE(p) || p->wTriggerMode == kTriggerNone || p->wTriggerScript == 0 ||
+      if (!EVENT_IS_ACTIVE(p) || p->wTriggerMode == kTriggerNone || p->wTriggerScript == 0 ||
          (TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags & (kTrainerScriptScene | kTrainerScriptStory |
             kTrainerScriptBattle | kTrainerScriptMove | kTrainerScriptCarry)) != 0 ||
-         (g_Walk.job != kTrainerJobNone && TRAINER_WasTried((WORD)id)))
+         (TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags & kTrainerScriptChange) == 0)
       {
          continue;
       }
@@ -956,12 +1233,53 @@ TRAINER_FindLever(
          rgbSeen[wCurrent >> 3] |= (1 << (wCurrent & 7));
          q = &gpGlobals->g.lprgScriptEntry[wCurrent];
 
-         if (q->wOperation == 0x0049 && q->rgwOperand[0] == wBlocker && (SHORT)q->rgwOperand[1] < kObjStateBlocker)
+         if (q->wOperation == 0x0049 && q->rgwOperand[0] != id && (SHORT)q->rgwOperand[1] < kObjStateBlocker &&
+            q->rgwOperand[0] >= FIRST_EVENT_OF(wScene) && q->rgwOperand[0] <= LAST_EVENT_OF(wScene) &&
+            EVENT(q->rgwOperand[0])->sState >= kObjStateBlocker && g_nLever < MAX_LEVERS)
          {
-            return (WORD)id;
+            g_rgLever[g_nLever].wScene = wScene;
+            g_rgLever[g_nLever].wLever = (WORD)id;
+            g_rgLever[g_nLever].wBlocker = q->rgwOperand[0];
+            g_nLever++;
          }
 
          TRAINER_PushNextLines(q, wCurrent, rgwTodo, &nTodo);
+      }
+   }
+}
+
+static WORD
+TRAINER_FindLever(
+   WORD           wScene,
+   WORD           wBlocker
+)
+/*++
+  Purpose:
+
+    Find a lever in a scene that gets something out of the way, see TRAINER_ListLevers().
+
+  Parameters:
+
+    [IN]  wScene - the scene.
+
+    [IN]  wBlocker - what is in the way.
+
+  Return value:
+
+    The lever, or 0 if there is none.
+
+--*/
+{
+   int   i;
+
+   TRAINER_ListLevers(wScene);
+
+   for (i = 0; i < g_nLever; i++)
+   {
+      if (g_rgLever[i].wScene == wScene && g_rgLever[i].wBlocker == wBlocker &&
+         !(g_Walk.job != kTrainerJobNone && TRAINER_WasTried(g_rgLever[i].wLever)))
+      {
+         return g_rgLever[i].wLever;
       }
    }
 
@@ -1047,7 +1365,7 @@ TRAINER_BuildZones(
 
          if (wWho == 0 && p->sState >= kObjStateBlocker)
          {
-            wWho = TRAINER_FindLever((WORD)id);
+            wWho = TRAINER_FindLever(gpGlobals->wNumScene, (WORD)id);
          }
       }
 
@@ -1503,8 +1821,6 @@ TRAINER_FindObstacle(
    return FALSE;
 }
 
-#define SCENE_IN_SET(set, s)    (((set)[(s) >> 3] & (1 << ((s) & 7))) != 0)
-#define ADD_SCENE_TO_SET(set, s) ((set)[(s) >> 3] |= (BYTE)(1 << ((s) & 7)))
 
 static BOOL
 TRAINER_IsWanted(
@@ -1525,17 +1841,19 @@ TRAINER_IsWanted(
 }
 
 static VOID
-TRAINER_FloodScene(
+TRAINER_FloodOnce(
    WORD           wScene,
    LPCPALMAP      lpMap,
    INT            xStart,
-   INT            yStart
+   INT            yStart,
+   const BYTE    *rgbOpen
 )
 /*++
   Purpose:
 
     Find all the ways out that the party can walk to from a position in any scene, not only
-    the current one, and how far they are. The same for the events wanted by the planning.
+    the current one, and how far they are. The same for the events wanted by the planning,
+    and for the levers that open what is still in the way, when rgbOpen is given.
 
     Monsters do not count as obstacles, as there will be a battle and then they are gone.
     People who start a story do, the same as when walking in a scene.
@@ -1552,6 +1870,9 @@ TRAINER_FloodScene(
     [IN]  xStart - the X coordinate to start from.
 
     [IN]  yStart - the Y coordinate to start from.
+
+    [IN]  rgbOpen - for each event of the scene, whether the gate it is has been opened by
+                    a lever; NULL to leave levers out.
 
   Return value:
 
@@ -1613,6 +1934,8 @@ TRAINER_FloodScene(
             }
          }
 
+         fTried = fTried || (g_Story.fActive && TRAINER_StoryFailed((WORD)id));
+
          if (!fTried && g_nEdge < MAX_PLAN_EDGES)
          {
             g_rgEdge[g_nEdge].wEvent = (WORD)id;
@@ -1621,6 +1944,7 @@ TRAINER_FloodScene(
             g_rgEdge[g_nEdge].y = -1;
             g_rgEdge[g_nEdge].iDist = -1;
             g_rgEdge[g_nEdge].iRide = 0;
+            g_rgEdge[g_nEdge].fPass = FALSE;
 
             if (pInfo->wFlags & kTrainerScriptMove)
             {
@@ -1651,12 +1975,36 @@ TRAINER_FloodScene(
          g_rgEdge[g_nEdge].y = -1;
          g_rgEdge[g_nEdge].iDist = -1;
          g_rgEdge[g_nEdge].iRide = 0;
+         g_rgEdge[g_nEdge].fPass = FALSE;
          g_nEdge++;
       }
 
-      if (p->sState >= kObjStateBlocker && !TRAINER_HasMonsterScript(p))
+      if (p->sState >= kObjStateBlocker && !TRAINER_HasMonsterScript(p) &&
+         !(rgbOpen != NULL && rgbOpen[id - FIRST_EVENT_OF(wScene)]))
       {
          iRadius = 16;
+
+         //
+         // Is there a lever for it? Then whether that can be reached matters.
+         //
+         if (rgbOpen != NULL)
+         {
+            const WORD wLever = TRAINER_FindLever(wScene, (WORD)id);
+
+            for (n = 0; n < g_nEdge && wLever != 0 && g_rgEdge[n].wEvent != wLever; n++);
+
+            if (wLever != 0 && n == g_nEdge && g_nEdge < MAX_PLAN_EDGES)
+            {
+               g_rgEdge[g_nEdge].wEvent = wLever;
+               g_rgEdge[g_nEdge].wScene = 0;
+               g_rgEdge[g_nEdge].x = -1;
+               g_rgEdge[g_nEdge].y = -1;
+               g_rgEdge[g_nEdge].iDist = -1;
+               g_rgEdge[g_nEdge].iRide = 0;
+               g_rgEdge[g_nEdge].fPass = TRUE;
+               g_nEdge++;
+            }
+         }
       }
 
       if (EVENT_IS_ACTIVE(p) && p->wTriggerMode >= kTriggerTouchNear && p->wTriggerScript != 0 &&
@@ -1744,7 +2092,8 @@ TRAINER_FloodScene(
          }
 
          //
-         // Ways out that are touched take the party away from here at once.
+         // Ways out that are touched take the party away from here at once. A lever only
+         // gets pulled, and the party walks on.
          //
          for (i = 0; i < g_nEdge && fFree; i++)
          {
@@ -1753,7 +2102,7 @@ TRAINER_FloodScene(
             if (p->wTriggerMode >= kTriggerTouchNear && TRAINER_FindPuzzle(p) == NULL &&
                TRAINER_CanReachEvent(xNext, yNext, p, &dirFace))
             {
-               fFree = FALSE;
+               fFree = g_rgEdge[i].fPass;
 
                if (g_rgEdge[i].iDist < 0)
                {
@@ -1766,6 +2115,76 @@ TRAINER_FloodScene(
          {
             rgwDist[iNext] = rgwDist[iNode] + 1;
             rgwQueue[iTail++] = (WORD)iNext;
+         }
+      }
+   }
+}
+
+static VOID
+TRAINER_FloodScene(
+   WORD           wScene,
+   LPCPALMAP      lpMap,
+   INT            xStart,
+   INT            yStart
+)
+/*++
+  Purpose:
+
+    Find all the ways out that the party can walk to from a position in any scene, and how
+    far they are, see TRAINER_FloodOnce().
+
+    When moving the story on, a gate counts as open once its lever can be reached, and then
+    the party may get further, to more levers. The distances leave out going to the levers.
+
+  Parameters:
+
+    [IN]  wScene - the scene.
+
+    [IN]  lpMap - the map of that scene.
+
+    [IN]  xStart - the X coordinate to start from.
+
+    [IN]  yStart - the Y coordinate to start from.
+
+  Return value:
+
+    None. The ways out are in g_rgEdge.
+
+--*/
+{
+   static BYTE   rgbOpen[MAX_SCENE_EVENTS];
+   BOOL          fAgain = TRUE;
+   int           id, i;
+
+   if (!g_Story.fActive || LAST_EVENT_OF(wScene) - FIRST_EVENT_OF(wScene) >= MAX_SCENE_EVENTS)
+   {
+      TRAINER_FloodOnce(wScene, lpMap, xStart, yStart, NULL);
+      return;
+   }
+
+   memset(rgbOpen, 0, sizeof(rgbOpen));
+
+   while (fAgain)
+   {
+      TRAINER_FloodOnce(wScene, lpMap, xStart, yStart, rgbOpen);
+      fAgain = FALSE;
+
+      for (id = FIRST_EVENT_OF(wScene); id <= LAST_EVENT_OF(wScene); id++)
+      {
+         const WORD wLever = TRAINER_FindLever(wScene, (WORD)id);
+
+         if (wLever == 0 || rgbOpen[id - FIRST_EVENT_OF(wScene)])
+         {
+            continue;
+         }
+
+         for (i = 0; i < g_nEdge; i++)
+         {
+            if (g_rgEdge[i].wEvent == wLever && g_rgEdge[i].fPass && g_rgEdge[i].iDist >= 0)
+            {
+               rgbOpen[id - FIRST_EVENT_OF(wScene)] = 1;
+               fAgain = TRUE;
+            }
          }
       }
    }
@@ -1967,8 +2386,9 @@ TRAINER_Explore(
     teleporters within the scene, so what matters is not only the scene but where the
     party arrives in it. The right way can even be to climb back up and take another hole.
 
-    With events wanted in g_rgWant this stays within the current scene, and tells how far
-    each of them is. With g_fWantNearest it stops at the first one found.
+    With events wanted in g_rgWant this stays within the current scene, unless
+    g_fWantAnywhere is set, and tells how far each of them is. With g_fWantNearest it stops
+    at the first one found.
 
   Parameters:
 
@@ -1986,6 +2406,8 @@ TRAINER_Explore(
    FILE        *fpMap = UTIL_OpenRequiredFile("map.mkf");
    FILE        *fpGop = UTIL_OpenRequiredFile("gop.mkf");
    INT          nMap = 0, iGoal = -1, i, j;
+
+   TRAINER_ForgetLevers();
 
    g_nNode = 1;
    g_rgNode[0].wScene = gpGlobals->wNumScene;
@@ -2090,7 +2512,7 @@ TRAINER_Explore(
 
          if (pEdge->iDist < 0 || pEdge->wScene == 0 || pEdge->wScene >= MAX_SCENES ||
             (fDungeon && g_rgbFloor[pEdge->wScene] == 0) ||
-            (g_nWant > 0 && pEdge->wScene != gpGlobals->wNumScene))
+            (g_nWant > 0 && !g_fWantAnywhere && pEdge->wScene != gpGlobals->wNumScene))
          {
             continue;
          }
@@ -2326,7 +2748,7 @@ TRAINER_EndJob(
 
 --*/
 {
-   if (g_Walk.job != kTrainerJobNone && !g_fAutoBattle)
+   if (g_Walk.job != kTrainerJobNone && !g_fAutoBattle && !g_Story.fActive)
    {
       gpGlobals->fAutoBattle = FALSE;
    }
@@ -2338,6 +2760,34 @@ TRAINER_EndJob(
    {
       TRAINER_SetToast(lpszMessage);
    }
+}
+
+static VOID
+TRAINER_EndStory(
+   LPCWSTR        lpszMessage
+)
+/*++
+  Purpose:
+
+    Stop moving the story on, and whatever it is doing for that, and tell why.
+
+  Parameters:
+
+    [IN]  lpszMessage - what to tell, or NULL for nothing.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   if (g_Story.fActive && !g_fAutoBattle)
+   {
+      gpGlobals->fAutoBattle = FALSE;
+   }
+
+   g_Story.fActive = FALSE;
+   TRAINER_EndJob(lpszMessage);
 }
 
 VOID
@@ -2359,7 +2809,30 @@ TRAINER_Stop(
 
 --*/
 {
-   TRAINER_EndJob(NULL);
+   TRAINER_EndStory(NULL);
+}
+
+FLOAT
+TRAINER_GetDialogSeconds(
+   VOID
+)
+/*++
+  Purpose:
+
+    Tell how long a page of dialog waits for a key. While the trainer moves the story on,
+    the pages turn by themselves, after long enough to read them.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    The number of seconds, or 0 to wait for a key.
+
+--*/
+{
+   return g_Story.fActive ? STORY_DIALOG_SECONDS : 0.0f;
 }
 
 static VOID
@@ -2876,6 +3349,14 @@ TRAINER_FailTarget(
 
 --*/
 {
+   //
+   // Moving the story on does not go for it again for a while.
+   //
+   if (g_Story.fActive && g_Walk.wTarget != 0)
+   {
+      TRAINER_MarkStoryFailed(g_Walk.wTarget);
+   }
+
    if (g_Walk.job == kTrainerJobCollect || g_Walk.job == kTrainerJobPuzzle)
    {
       TRAINER_MarkTried(g_Walk.wTarget);
@@ -3005,8 +3486,15 @@ TRAINER_Walk(
 
    p = EVENT(g_Walk.wTarget);
 
-   if (g_Walk.job == kTrainerJobCollect ? !TRAINER_IsTreasure(g_Walk.wTarget) : !EVENT_IS_ACTIVE(p))
+   //
+   // A lever, or someone who has had their say, may no longer be triggered at all. What an
+   // item is used on never was.
+   //
+   if (g_Walk.job == kTrainerJobCollect ? !TRAINER_IsTreasure(g_Walk.wTarget) :
+      (!EVENT_IS_ACTIVE(p) || (p->wTriggerMode == kTriggerNone && g_Walk.job != kTrainerJobPuzzle)))
    {
+      g_Story.fReached = g_Story.fReached || (g_Walk.wTarget == g_Story.wPending);
+
       //
       // Something else took care of it on the way
       //
@@ -3033,8 +3521,9 @@ TRAINER_Walk(
 
       //
       // Not on this part of the map: is there a raft or a teleporter that leads there?
+      // A route through scenes only goes up to what is in the way when moving the story on.
       //
-      if (g_Walk.job == kTrainerJobRoute || g_Walk.job == kTrainerJobHunt)
+      if ((g_Walk.job == kTrainerJobRoute && !g_Walk.fObstacles) || g_Walk.job == kTrainerJobHunt)
       {
          TRAINER_FailTarget();
          return;
@@ -3110,6 +3599,8 @@ TRAINER_Walk(
 
    if (route.iDist == 0)
    {
+      g_Story.fReached = g_Story.fReached || (g_Walk.wTarget == g_Story.wPending);
+
       //
       // Touching an event has already triggered it in PAL_GameUpdate().
       //
@@ -3266,7 +3757,7 @@ TRAINER_ApplyAutoBattle(
 
 --*/
 {
-   if (g_fAutoBattle || g_Walk.job != kTrainerJobNone)
+   if (g_fAutoBattle || g_Walk.job != kTrainerJobNone || g_Story.fActive)
    {
       gpGlobals->fAutoBattle = TRUE;
    }
@@ -3277,7 +3768,7 @@ TRAINER_IsFightingByItself(
    VOID
 )
 {
-   return g_Walk.job != kTrainerJobNone && gpGlobals->fAutoBattle;
+   return (g_Walk.job != kTrainerJobNone || g_Story.fActive) && gpGlobals->fAutoBattle;
 }
 
 VOID
@@ -3303,9 +3794,10 @@ TRAINER_CheckBattleInput(
 {
    int   i;
 
-   if (g_InputState.dwKeyPress != 0 && gpGlobals->fAutoBattle && (g_fAutoBattle || g_Walk.job != kTrainerJobNone))
+   if (g_InputState.dwKeyPress != 0 && gpGlobals->fAutoBattle &&
+      (g_fAutoBattle || g_Walk.job != kTrainerJobNone || g_Story.fActive))
    {
-      TRAINER_EndJob(L"已停止");
+      TRAINER_EndStory(L"已停止");
       gpGlobals->fAutoBattle = FALSE;
    }
 
@@ -3324,6 +3816,366 @@ TRAINER_CheckBattleInput(
             gpGlobals->g.PlayerRoles.rgwHP[w] = gpGlobals->g.PlayerRoles.rgwMaxHP[w];
          }
       }
+   }
+}
+
+// What counts as a reason to go to another scene: levers only matter where the party is.
+#define STORY_STRONG            (kTrainerScriptStory | kTrainerScriptBattle | kTrainerScriptScene | \
+                                 kTrainerScriptItem | kTrainerScriptCash)
+
+static VOID
+TRAINER_StartStoryJob(
+   TRAINERJOB     job,
+   WORD           wTarget
+)
+{
+   TRAINER_StartJob(job, wTarget);
+   g_Walk.fObstacles = TRUE;   // the story is what going up to them moves on
+   g_Walk.nFrames = START_GRACE_FRAMES + 1;   // no key confirms this one
+}
+
+static WORD
+TRAINER_FirstWayTo(
+   INT            iNode
+)
+/*++
+  Purpose:
+
+    Find the way out of the place the party is in that the plan to a place starts with.
+
+  Parameters:
+
+    [IN]  iNode - the place, other than where the party is.
+
+  Return value:
+
+    The way out.
+
+--*/
+{
+   while (g_rgNode[iNode].iFrom > 0)
+   {
+      iNode = g_rgNode[iNode].iFrom;
+   }
+
+   return g_rgNode[iNode].wEvent;
+}
+
+static VOID
+TRAINER_SetPending(
+   WORD           wEventObjectID,
+   BOOL           fStep
+)
+{
+   g_Story.wPending = wEventObjectID;
+   g_Story.wPendingScript = EVENT(wEventObjectID)->wTriggerScript;
+   g_Story.fPendingStep = fStep;
+   g_Story.fReached = FALSE;
+}
+
+static BOOL
+TRAINER_StoryHere(
+   VOID
+)
+/*++
+  Purpose:
+
+    Go up to the nearest thing in the current scene that may move the story on, past what
+    stands in the way if need be. Each of them gets one go as it is.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    TRUE if the party is going.
+
+--*/
+{
+   WORD           rgwTarget[MAX_TARGETS];
+   INT            nTarget = 0, i, iBest = 0;
+   int            id;
+   TRAINERROUTE   route;
+   WORD           wHop, wChosen = 0, wObstacle;
+
+   for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT() && nTarget < MAX_TARGETS; id++)
+   {
+      if (TRAINER_IsStoryStep((WORD)id) && !TRAINER_StoryTried((WORD)id) && !TRAINER_StoryFailed((WORD)id))
+      {
+         rgwTarget[nTarget++] = (WORD)id;
+      }
+   }
+
+   if (nTarget == 0)
+   {
+      return FALSE;
+   }
+
+   if (TRAINER_FindRoute(rgwTarget, nTarget, &route))
+   {
+      wChosen = route.wTarget;
+   }
+   else if (!TRAINER_PlanHop(rgwTarget, nTarget, &wHop, &wChosen))
+   {
+      wChosen = 0;
+
+      for (i = 0; i < nTarget; i++)
+      {
+         if (TRAINER_FindObstacle(rgwTarget[i], &wObstacle) && TRAINER_FindRoute(&wObstacle, 1, &route) &&
+            (wChosen == 0 || route.iDist < iBest))
+         {
+            wChosen = rgwTarget[i];
+            iBest = route.iDist;
+         }
+      }
+   }
+
+   if (wChosen == 0)
+   {
+      return FALSE;
+   }
+
+   TRAINER_StartStoryJob(kTrainerJobWalk, wChosen);
+   TRAINER_SetPending(wChosen, TRUE);
+   return TRUE;
+}
+
+static BOOL
+TRAINER_StoryElsewhere(
+   VOID
+)
+/*++
+  Purpose:
+
+    Head for the nearest thing in any scene that may move the story on, one way out at a
+    time: what the party finds on the way may change everything.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    TRUE if the party is going.
+
+--*/
+{
+   INT    i, iBest = -1;
+   int    s, id;
+   WORD   wTarget, wGoal;
+
+   g_nWant = 0;
+
+   for (s = 1; s < MAX_SCENES && g_nWant < MAX_TARGETS; s++)
+   {
+      for (id = FIRST_EVENT_OF(s); id <= LAST_EVENT_OF(s) && g_nWant < MAX_TARGETS; id++)
+      {
+         if (TRAINER_IsStoryStep((WORD)id) && !TRAINER_StoryTried((WORD)id) && !TRAINER_StoryFailed((WORD)id) &&
+            (TRAINER_GetScriptInfo(EVENT(id)->wTriggerScript)->wFlags & STORY_STRONG) != 0)
+         {
+            g_rgWant[g_nWant].wEvent = (WORD)id;
+            g_rgWant[g_nWant].iNode = -1;
+            g_rgWant[g_nWant].iSteps = 0;
+            g_nWant++;
+         }
+      }
+   }
+
+   if (g_nWant == 0)
+   {
+      return FALSE;
+   }
+
+   g_fWantAnywhere = TRUE;
+   g_fWantNearest = TRUE;
+   TRAINER_Explore(0, FALSE);
+   g_fWantAnywhere = FALSE;
+   g_fWantNearest = FALSE;
+
+   for (i = 0; i < g_nWant; i++)
+   {
+      if (g_rgWant[i].iNode >= 0 && (iBest < 0 || g_rgWant[i].iSteps < g_rgWant[iBest].iSteps))
+      {
+         iBest = i;
+      }
+   }
+
+   if (iBest < 0)
+   {
+      g_nWant = 0;
+      return FALSE;
+   }
+
+   //
+   // It may be right here after all, by a way the walking did not see.
+   //
+   wGoal = g_rgWant[iBest].wEvent;
+   wTarget = (g_rgWant[iBest].iNode == 0) ? wGoal : TRAINER_FirstWayTo(g_rgWant[iBest].iNode);
+   g_nWant = 0;
+
+   TRAINER_StartStoryJob(kTrainerJobWalk, wTarget);
+   TRAINER_SetPending(wTarget, wTarget == wGoal);
+   g_Story.wGoal = wGoal;
+   return TRUE;
+}
+
+static BOOL
+TRAINER_StoryUnseen(
+   VOID
+)
+/*++
+  Purpose:
+
+    Head for the nearest scene not been to yet, one way out at a time. Entering a scene is
+    what starts much of the story.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    TRUE if the party is going.
+
+--*/
+{
+   INT   i, iBest = -1;
+
+   TRAINER_Explore(0, FALSE);
+
+   for (i = 1; i < g_nNode; i++)
+   {
+      if (g_rgNode[i].wScene < MAX_SCENES && !SCENE_IN_SET(g_Story.rgbVisited, g_rgNode[i].wScene) &&
+         (iBest < 0 || g_rgNode[i].iSteps < g_rgNode[iBest].iSteps))
+      {
+         iBest = i;
+      }
+   }
+
+   if (iBest < 0)
+   {
+      return FALSE;
+   }
+
+   TRAINER_StartStoryJob(kTrainerJobWalk, TRAINER_FirstWayTo(iBest));
+   TRAINER_SetPending(g_Walk.wTarget, FALSE);
+   return TRUE;
+}
+
+static VOID
+TRAINER_NextStoryStep(
+   VOID
+)
+/*++
+  Purpose:
+
+    Decide what to do next for moving the story on, and start doing it: the treasures and
+    puzzles of the scene first, then whatever in it may move the story on, then the nearest
+    such thing anywhere, then the deepest place of the dungeon, then scenes not seen yet.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   WORD   wMissing, wDeepest;
+   INT    i, n = 0;
+   int    id;
+
+   g_Story.wGoal = 0;
+   TRAINER_ForgetLevers();
+
+   //
+   // Something that the walk there did not give up on has been triggered: once is enough,
+   // until its script changes.
+   //
+   if (g_Story.wPending != 0 && g_Story.fPendingStep && g_Story.fReached)
+   {
+      TRAINER_AddStoryTried(g_Story.wPending, g_Story.wPendingScript);
+   }
+
+   g_Story.wPending = 0;
+
+   if (g_Story.wScene != gpGlobals->wNumScene)
+   {
+      g_Story.wScene = gpGlobals->wNumScene;
+      g_Story.nDecisions = 0;
+
+      for (i = 0; i < g_Story.nFailed; i++)
+      {
+         g_Story.rgFailed[i].fNow = FALSE;
+      }
+   }
+
+   if (++g_Story.nDecisions > MAX_STORY_DECISIONS)
+   {
+      TRAINER_EndStory(TR("劇情卡住了，請手動處理", "剧情卡住了，请手动处理"));
+      return;
+   }
+
+   ADD_SCENE_TO_SET(g_Story.rgbVisited, gpGlobals->wNumScene);
+
+   //
+   // The treasures and puzzles of the scene, all of them in one go each.
+   //
+   for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT(); id++)
+   {
+      if (TRAINER_IsTreasure((WORD)id) && !TRAINER_StoryTried((WORD)id))
+      {
+         TRAINER_MarkStoryTried((WORD)id);
+         n++;
+      }
+   }
+
+   if (n > 0)
+   {
+      TRAINER_StartStoryJob(kTrainerJobCollect, 0);
+      return;
+   }
+
+   TRAINER_ListPuzzles(&wMissing);
+
+   for (i = 0; i < g_nPuzzle; i++)
+   {
+      if (!TRAINER_StoryTried(g_rgPuzzle[i].wEvent))
+      {
+         TRAINER_MarkStoryTried(g_rgPuzzle[i].wEvent);
+         n++;
+      }
+   }
+
+   if (n > 0)
+   {
+      TRAINER_StartStoryJob(kTrainerJobPuzzle, 0);
+      return;
+   }
+
+   if (TRAINER_StoryHere() || TRAINER_StoryElsewhere())
+   {
+      return;
+   }
+
+   //
+   // The bottom of a dungeon is where its story is, once.
+   //
+   wDeepest = TRAINER_FindDeepestScene();
+
+   if (wDeepest != 0 && !SCENE_IN_SET(g_Story.rgbVisited, wDeepest))
+   {
+      TRAINER_StartStoryJob(kTrainerJobRoute, 0);
+      g_Walk.wGoalScene = wDeepest;
+      return;
+   }
+
+   if (!TRAINER_StoryUnseen())
+   {
+      TRAINER_EndStory(TR("找不到推進劇情的路了", "找不到推进剧情的路了"));
    }
 }
 
@@ -3357,8 +4209,19 @@ TRAINER_Update(
 
    g_Walk.dirStep = kDirUnknown;
 
+   if (g_Story.fActive && ++g_Story.nFrames > START_GRACE_FRAMES &&
+      (g_InputState.dwKeyPress != 0 || g_InputState.dir != kDirUnknown))
+   {
+      TRAINER_EndStory(L"已停止");
+      return;
+   }
+
    if (g_Walk.job == kTrainerJobNone)
    {
+      if (g_Story.fActive)
+      {
+         TRAINER_NextStoryStep();
+      }
       return;
    }
 
@@ -3375,6 +4238,7 @@ TRAINER_Update(
 
       g_Walk.wScene = gpGlobals->wNumScene;
       g_Walk.wTarget = 0;
+      g_Walk.wHop = 0;
       g_Walk.nTried = 0;
       g_Walk.posLast = PAL_XY(-1, -1);
    }
@@ -3382,7 +4246,7 @@ TRAINER_Update(
    if (++g_Walk.nFrames > START_GRACE_FRAMES &&
       (g_InputState.dwKeyPress != 0 || g_InputState.dir != kDirUnknown))
    {
-      TRAINER_EndJob(L"已停止");
+      TRAINER_EndStory(L"已停止");
       return;
    }
 
@@ -3433,7 +4297,17 @@ TRAINER_DrawOverlay(
    LPCWSTR   lpszText = NULL;
    WCHAR     szText[64];
 
-   if (g_Walk.job == kTrainerJobCollect)
+   if (g_Story.fActive && g_Story.wGoal != 0 && g_Walk.job == kTrainerJobWalk)
+   {
+      PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR),
+         TR("推進劇情：前往場景 %d，按任意鍵停止", "推进剧情：前往场景 %d，按任意键停止"), TRAINER_SceneOf(g_Story.wGoal));
+      lpszText = szText;
+   }
+   else if (g_Story.fActive && (g_Walk.job == kTrainerJobWalk || g_Walk.job == kTrainerJobNone))
+   {
+      lpszText = TR("推進劇情中，按任意鍵停止", "推进剧情中，按任意键停止");
+   }
+   else if (g_Walk.job == kTrainerJobCollect)
    {
       PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR),
          TR("尋寶中，已收集 %d 處，按任意鍵停止", "寻宝中，已收集 %d 处，按任意键停止"), g_Walk.nCollected);
@@ -4464,6 +5338,31 @@ TRAINER_MagicMenu(
    }
 }
 
+static VOID
+TRAINER_StartStory(
+   VOID
+)
+/*++
+  Purpose:
+
+    Start moving the story on, forgetting what an earlier go at it has tried.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   TRAINER_EndJob(NULL);
+   memset(&g_Story, 0, sizeof(g_Story));
+   g_Story.fActive = TRUE;
+   TRAINER_ApplyAutoBattle();
+}
+
 static LPCWSTR
 TRAINER_MainLabel(
    INT            iItem,
@@ -4473,21 +5372,24 @@ TRAINER_MainLabel(
    switch (iItem)
    {
    case 0:
-      return TR("尋寶", "寻宝");
+      return TR("自動推進劇情", "自动推进剧情");
 
    case 1:
-      return L"前往出口";
+      return TR("尋寶", "寻宝");
 
    case 2:
-      return TR("自動解謎", "自动解谜");
+      return L"前往出口";
 
    case 3:
-      return TR("自動打怪", "自动打怪");
+      return TR("自動解謎", "自动解谜");
 
    case 4:
-      return g_fAutoBattle ? TR("自動戰鬥：開啟", "自动战斗：开启") : TR("自動戰鬥：關閉", "自动战斗：关闭");
+      return TR("自動打怪", "自动打怪");
 
    case 5:
+      return g_fAutoBattle ? TR("自動戰鬥：開啟", "自动战斗：开启") : TR("自動戰鬥：關閉", "自动战斗：关闭");
+
+   case 6:
       if (g_wAutoLevel == 0)
       {
          return TR("自動升級：關閉", "自动升级：关闭");
@@ -4495,11 +5397,11 @@ TRAINER_MainLabel(
       PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("自動升級：%d 級", "自动升级：%d 级"), g_wAutoLevel);
       return g_szLabel;
 
-   case 6:
+   case 7:
       PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("修改金錢：%d", "修改金钱：%d"), (INT)gpGlobals->dwCash);
       return g_szLabel;
 
-   case 7:
+   case 8:
       return TR("獲得物品", "获得物品");
 
    default:
@@ -4531,43 +5433,48 @@ TRAINER_Menu(
 
    while (!fClose)
    {
-      switch (TRAINER_ListMenu(L"修改器", 9, 1, &iCursor, TRAINER_MainLabel, NULL))
+      switch (TRAINER_ListMenu(L"修改器", 10, 1, &iCursor, TRAINER_MainLabel, NULL))
       {
       case 0:
-         fClose = TRAINER_TreasureMenu();
+         TRAINER_StartStory();
+         fClose = TRUE;
          break;
 
       case 1:
-         fClose = TRAINER_ExitMenu();
+         fClose = TRAINER_TreasureMenu();
          break;
 
       case 2:
+         fClose = TRAINER_ExitMenu();
+         break;
+
+      case 3:
          TRAINER_StartPuzzle();
          fClose = TRUE;
          break;
 
-      case 3:
+      case 4:
          fClose = TRAINER_HuntMenu();
          break;
 
-      case 4:
+      case 5:
          g_fAutoBattle = !g_fAutoBattle;
          gpGlobals->fAutoBattle = g_fAutoBattle;
          break;
 
-      case 5:
+      case 6:
          fClose = TRAINER_LevelMenu();
          break;
 
-      case 6:
+      case 7:
          TRAINER_MoneyMenu();
          break;
 
-      case 7:
+      case 8:
          TRAINER_ItemMenu();
          break;
 
-      case 8:
+      case 9:
          TRAINER_MagicMenu();
          break;
 

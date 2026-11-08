@@ -37,6 +37,8 @@ typedef enum tagTRAINERSCRIPTFLAG
    kTrainerScriptCarry   = (1 << 7),   // walks or carries the party somewhere
    kTrainerScriptCarryTo = (1 << 8),   // and it is known where that ends
    kTrainerScriptRide    = (1 << 9),   // the event itself moves along with the party
+   kTrainerScriptChange  = (1 << 10),  // changes events, scenes or the party for good
+   kTrainerScriptTrade   = (1 << 11),  // a shop, or takes money
 } TRAINERSCRIPTFLAG;
 
 typedef struct tagTRAINERSCRIPTINFO
@@ -73,6 +75,11 @@ TRAINER_Update(
 
 VOID
 TRAINER_Stop(
+   VOID
+);
+
+FLOAT
+TRAINER_GetDialogSeconds(
    VOID
 );
 

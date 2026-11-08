@@ -1752,9 +1752,9 @@ PAL_InterpretInstruction(
 
    case 0x004D:
       //
-      // wait for any key
+      // wait for any key, or not that long while the trainer moves the story on
       //
-      PAL_WaitForKey(0);
+      PAL_WaitForKey((WORD)(TRAINER_GetDialogSeconds() * 1000));
       break;
 
    case 0x004E:

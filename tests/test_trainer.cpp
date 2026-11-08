@@ -100,7 +100,49 @@ TEST_F(TrainerScript, ShopIsNoTreasure) {
     TRAINERSCRIPTINFO info = analyze(1);
     EXPECT_NE(0, info.wFlags & kTrainerScriptItem);
     EXPECT_NE(0, info.wFlags & kTrainerScriptOther);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptTrade);
     EXPECT_EQ(0, info.wCash);
+}
+
+TEST_F(TrainerScript, ShopMenuIsTrade) {
+    line(1, 0x003B);
+    line(2, 0xFFFF, 7);
+    line(3, 0x0026, 2);              // the buy menu
+    line(4, 0x0000);
+
+    EXPECT_NE(0, analyze(1).wFlags & kTrainerScriptTrade);
+}
+
+TEST_F(TrainerScript, LeverChangesOtherEvents) {
+    line(1, 0x0040, 0xFFFF, 0);      // cannot be pulled again
+    line(2, 0x0014, 1);
+    line(3, 0x0049, 0x472, 1);       // the gate is no longer in the way
+    line(4, 0x0049, 0x473, 0);
+    line(5, 0x0000);
+
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptChange);
+    EXPECT_EQ(0, info.wFlags & (kTrainerScriptStory | kTrainerScriptTrade));
+}
+
+TEST_F(TrainerScript, HidingItselfChangesNothingElse) {
+    line(1, 0x003E);
+    line(2, 0xFFFF, 0x04F1);
+    line(3, 0x0049, 0xFFFF, 0);
+    line(4, 0x0000);
+
+    EXPECT_EQ(0, analyze(1).wFlags & kTrainerScriptChange);
+}
+
+TEST_F(TrainerScript, SettingAnotherScriptMovesTheStoryOn) {
+    line(1, 0x003C, 3);
+    line(2, 0xFFFF, 1);
+    line(3, 0x0025, 0x123, 0x456);   // someone else says something new from now on
+    line(4, 0x0000);
+
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptChange);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptStory);
 }
 
 TEST_F(TrainerScript, MonsterIsNoStoryEvenWithTextWhenLosing) {

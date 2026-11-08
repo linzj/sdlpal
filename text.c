@@ -1464,7 +1464,10 @@ PAL_DialogWaitForKey(
    VOID
 )
 {
-   PAL_DialogWaitForKeyWithMaximumSeconds(0);
+   //
+   // The trainer may turn the pages by itself while it moves the story on.
+   //
+   PAL_DialogWaitForKeyWithMaximumSeconds(TRAINER_GetDialogSeconds());
 }
 
 int
