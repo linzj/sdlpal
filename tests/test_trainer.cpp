@@ -231,3 +231,54 @@ TEST_F(TrainerScript, TooLongToReadCountsAsStory) {
 TEST_F(TrainerScript, NoScript) {
     EXPECT_EQ(0, analyze(0).wFlags);
 }
+
+// The way on from the deepest floor of the tomb: only with the jade beads on.
+TEST_F(TrainerScript, DoorThatOpensWithSomethingOnLeadsOn) {
+    line(1, 0x0086, 0x112, 0, 10);   // jump if nobody wears the item
+    line(2, 0x0049, 0x4E4, 0);       // the barrier goes away
+    line(3, 0x0073);
+    line(4, 0x0002, 20);             // and the next time goes through
+    line(10, 0x006E, (WORD)-10, 10); // pushed back
+    line(11, 0x003B);
+    line(12, 0xFFFF, 0x133F);
+    line(13, 0x0000);
+
+    line(20, 0x0004, 30);            // walk in
+    line(21, 0x0059, 60);
+    line(22, 0x0046, 42, 95, 1);
+    line(23, 0x0050);
+    line(24, 0x0000);
+    line(30, 0x006E, (WORD)-10, 10);
+    line(31, 0x0000);
+
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_EQ(0x112, info.wWear);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptScene);
+    EXPECT_NE(0, info.wFlags & kTrainerScriptMove);
+    EXPECT_EQ(0, info.wFlags & kTrainerScriptStory);
+    EXPECT_EQ(60, info.wScene);
+    EXPECT_EQ(42 * 32 + 16, info.xMove);
+    EXPECT_EQ(95 * 16 + 8, info.yMove);
+}
+
+TEST_F(TrainerScript, WhatTheNextTimeSaysIsNotFollowed) {
+    line(1, 0x0049, 0x4E4, 0);
+    line(2, 0x0002, 20);
+    line(20, 0x003B);
+    line(21, 0xFFFF, 5);
+    line(22, 0x0000);
+
+    EXPECT_EQ(0, analyze(1).wFlags & kTrainerScriptStory);
+}
+
+TEST_F(TrainerScript, NextTimeDoesNotCountAfterTheStory) {
+    line(1, 0x003C, 3);              // someone talks first
+    line(2, 0xFFFF, 1);
+    line(3, 0x0002, 20);
+    line(20, 0x0059, 60);
+    line(21, 0x0000);
+
+    TRAINERSCRIPTINFO info = analyze(1);
+    EXPECT_EQ(0, info.wFlags & kTrainerScriptScene);
+    EXPECT_EQ(0, info.wScene);
+}

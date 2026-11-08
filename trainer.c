@@ -24,7 +24,9 @@
 //    or goes through as many scenes as it takes to the deepest place of a dungeon.
 //    It only steers the party the way the arrow keys do, so events and battles still happen
 //    as they would for a player, and any key takes back control.
-//    Whoever stands in the way of an exit gets talked to, as that is what moves the story on.
+//    Whoever stands in the way of an exit gets talked to, as that is what moves the story on,
+//    and a lever that opens the way gets pulled. A way that only lets the party through
+//    with something on gets it put on first.
 //  - Puzzles: goes to whatever in the scene an item in the inventory is meant to be used on,
 //    and uses it, the way the hammer breaks the statues around the lake.
 //  - Monsters: walks up to the monsters of the scene and fights them by itself, to level up.
@@ -119,10 +121,10 @@ typedef struct tagTRAINERZONE
    INT             x, y, iRadius;
 } TRAINERZONE;
 
-// Something in the way that going up to it may get out of the way.
+// Something in the way that going up to it, or to a lever, may get out of the way.
 typedef struct tagTRAINEROBSTACLE
 {
-   WORD            wEvent;
+   WORD            wEvent;    // what to go up to
    INT             x, y, iRadius;
 } TRAINEROBSTACLE;
 
@@ -329,26 +331,25 @@ TRAINER_PushNextLines(
    }
 }
 
-VOID
-TRAINER_AnalyzeScript(
+static VOID
+TRAINER_ReadScript(
    WORD                  wEntry,
-   LPTRAINERSCRIPTINFO   pInfo
+   LPTRAINERSCRIPTINFO   pInfo,
+   WORD                 *pwNext
 )
 /*++
   Purpose:
 
-    Find out what a trigger script can do without running it, by following every branch
-    and call that can be reached from its entry.
-
-    A script stopping with operation 0x0001 or 0x0002 continues somewhere else the next
-    time it is triggered. That is not followed, as it is not what triggering it now does:
-    a chest gives its items once and tells that it is empty from then on.
+    Find out what a trigger script does when it runs once, by following every branch and
+    call that can be reached from its entry.
 
   Parameters:
 
     [IN]  wEntry - the entry of the script.
 
     [OUT] pInfo - what the script can do.
+
+    [OUT] pwNext - where it goes on from the next time, if it stops to wait for that.
 
   Return value:
 
@@ -364,6 +365,7 @@ TRAINER_AnalyzeScript(
    memset(pInfo, 0, sizeof(TRAINERSCRIPTINFO));
    memset(rgbSeen, 0, sizeof(rgbSeen));
 
+   *pwNext = 0;
    pInfo->wEntry = wEntry;
    rgwTodo[nTodo++] = wEntry;
 
@@ -390,10 +392,37 @@ TRAINER_AnalyzeScript(
       switch (p->wOperation)
       {
       case 0x0000:
-      case 0x0001:
-      case 0x0002:
       case 0x0003:
          break;
+
+      case 0x0001:   // stops, and goes on from the next line the next time
+         if (*pwNext == 0)
+         {
+            *pwNext = wCurrent + 1;
+         }
+         break;
+
+      case 0x0002:   // stops, and goes on from another line the next time
+         if (*pwNext == 0 && p->rgwOperand[1] == 0)
+         {
+            *pwNext = p->rgwOperand[0];
+         }
+         break;
+
+      case 0x0086:
+         //
+         // Goes on only if someone in the party wears an item. The trainer puts it on before
+         // going there, see TRAINER_PutOn(), so what happens without it is left out.
+         //
+         if (pInfo->wWear == 0)
+         {
+            pInfo->wWear = p->rgwOperand[0];
+         }
+         if (nTodo < MAX_SCRIPT_TODO)
+         {
+            rgwTodo[nTodo++] = wCurrent + 1;
+         }
+         continue;   // instead of following the jump as well
 
       case 0x003E:   // text in a small window, which goes away by itself
          fWindow = TRUE;
@@ -509,6 +538,75 @@ TRAINER_AnalyzeScript(
    }
 }
 
+VOID
+TRAINER_AnalyzeScript(
+   WORD                  wEntry,
+   LPTRAINERSCRIPTINFO   pInfo
+)
+/*++
+  Purpose:
+
+    Find out what a trigger script can do without running it, by following every branch
+    and call that can be reached from its entry.
+
+    A script stopping with operation 0x0001 or 0x0002 continues somewhere else the next
+    time it is triggered. That is mostly not followed, as it is not what triggering it now
+    does: a chest gives its items once and tells that it is empty from then on.
+
+    A door that opens is different: the first time only gets it ready, and leaves the
+    party where it is, and the next time takes the party to another scene. An event that
+    is touched gets triggered again in the very next frame while the party stands there,
+    so going through is what touching it does.
+
+  Parameters:
+
+    [IN]  wEntry - the entry of the script.
+
+    [OUT] pInfo - what the script can do.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   TRAINERSCRIPTINFO   next;
+   WORD                wNext, wAfter;
+
+   TRAINER_ReadScript(wEntry, pInfo, &wNext);
+
+   if (wNext == 0 || wNext == wEntry ||
+      (pInfo->wFlags & (kTrainerScriptScene | kTrainerScriptMove | kTrainerScriptCarry |
+         kTrainerScriptStory | kTrainerScriptBattle)) != 0)
+   {
+      return;
+   }
+
+   TRAINER_ReadScript(wNext, &next, &wAfter);
+
+   if ((next.wFlags & kTrainerScriptScene) == 0)
+   {
+      return;
+   }
+
+   //
+   // What it gives, if anything, has already been counted the first time.
+   //
+   pInfo->wFlags |= next.wFlags & ~(kTrainerScriptItem | kTrainerScriptCash);
+   pInfo->wScene = next.wScene;
+   pInfo->xMove = next.xMove;
+   pInfo->yMove = next.yMove;
+   pInfo->xCarry = next.xCarry;
+   pInfo->yCarry = next.yCarry;
+   pInfo->xRide = next.xRide;
+   pInfo->yRide = next.yRide;
+
+   if (pInfo->wWear == 0)
+   {
+      pInfo->wWear = next.wWear;
+   }
+}
+
 static const TRAINERSCRIPTINFO *
 TRAINER_GetScriptInfo(
    WORD           wEntry
@@ -607,29 +705,6 @@ TRAINER_LeadsElsewhere(
 }
 
 static BOOL
-TRAINER_IsExit(
-   WORD           wEventObjectID
-)
-/*++
-  Purpose:
-
-    Tell whether an event takes the party to another scene and is not part of the story.
-
-  Parameters:
-
-    [IN]  wEventObjectID - the event.
-
-  Return value:
-
-    TRUE if the event is an exit.
-
---*/
-{
-   return TRAINER_LeadsElsewhere(wEventObjectID) &&
-      (TRAINER_GetScriptInfo(EVENT(wEventObjectID)->wTriggerScript)->wFlags & (kTrainerScriptBattle | kTrainerScriptStory)) == 0;
-}
-
-static BOOL
 TRAINER_HasMonsterScript(
    const EVENTOBJECT   *p
 )
@@ -666,6 +741,86 @@ TRAINER_IsMonster(
 }
 
 static BOOL
+TRAINER_IsWorn(
+   WORD           wItem
+)
+{
+   int   i, j;
+
+   for (i = 0; i <= gpGlobals->wMaxPartyMemberIndex; i++)
+   {
+      for (j = 0; j < MAX_PLAYER_EQUIPMENTS; j++)
+      {
+         if (gpGlobals->g.PlayerRoles.rgwEquipment[j][gpGlobals->rgParty[i].wPlayerRole] == wItem)
+         {
+            return TRUE;
+         }
+      }
+   }
+
+   return FALSE;
+}
+
+static INT
+TRAINER_FindWearer(
+   WORD           wItem
+)
+/*++
+  Purpose:
+
+    Find who in the party can put on an item from the inventory.
+
+  Parameters:
+
+    [IN]  wItem - the item.
+
+  Return value:
+
+    The index in the party, or -1 if the item is not in the inventory or nobody can wear it.
+
+--*/
+{
+   int   i;
+
+   if (PAL_GetItemAmount(wItem) <= 0)
+   {
+      return -1;
+   }
+
+   for (i = 0; i <= gpGlobals->wMaxPartyMemberIndex; i++)
+   {
+      if (gpGlobals->g.rgObject[wItem].item.wFlags & (kItemFlagEquipableByPlayerRole_First << gpGlobals->rgParty[i].wPlayerRole))
+      {
+         return i;
+      }
+   }
+
+   return -1;
+}
+
+static BOOL
+TRAINER_CanWear(
+   WORD           wItem
+)
+/*++
+  Purpose:
+
+    Tell whether someone in the party wears an item an event asks for, or can put it on.
+
+  Parameters:
+
+    [IN]  wItem - the item, 0 for none.
+
+  Return value:
+
+    TRUE if the event will let the party through.
+
+--*/
+{
+   return wItem == 0 || TRAINER_IsWorn(wItem) || TRAINER_FindWearer(wItem) >= 0;
+}
+
+static BOOL
 TRAINER_IsWayOut(
    const EVENTOBJECT   *p
 )
@@ -673,7 +828,8 @@ TRAINER_IsWayOut(
   Purpose:
 
     Tell whether an event moves the party when used, to somewhere the script tells or to
-    another scene, and nothing else stands in the way: no story and no fight.
+    another scene, and nothing else stands in the way: no story, no fight, and nothing to
+    wear that the party does not have.
 
   Parameters:
 
@@ -685,11 +841,12 @@ TRAINER_IsWayOut(
 
 --*/
 {
-   const WORD wFlags = TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags;
+   const TRAINERSCRIPTINFO   *pInfo = TRAINER_GetScriptInfo(p->wTriggerScript);
+   const WORD                 wFlags = pInfo->wFlags;
 
    return EVENT_IS_ACTIVE(p) && p->wTriggerMode != kTriggerNone &&
       (wFlags & (kTrainerScriptScene | kTrainerScriptMove | kTrainerScriptCarryTo)) != 0 &&
-      (wFlags & (kTrainerScriptStory | kTrainerScriptBattle)) == 0;
+      (wFlags & (kTrainerScriptStory | kTrainerScriptBattle)) == 0 && TRAINER_CanWear(pInfo->wWear);
 }
 
 static BOOL
@@ -745,6 +902,72 @@ TRAINER_CanBeGotPast(
    return !TRAINER_IsWayOut(p) && !(g_Walk.job != kTrainerJobNone && TRAINER_WasTried(wEventObjectID));
 }
 
+static WORD
+TRAINER_FindLever(
+   WORD           wBlocker
+)
+/*++
+  Purpose:
+
+    Find a lever in the current scene that gets something out of the way, as the ones that
+    open the gates of the tomb: triggering it does nothing else a player has to be there for.
+
+  Parameters:
+
+    [IN]  wBlocker - what is in the way.
+
+  Return value:
+
+    The lever, or 0 if there is none.
+
+--*/
+{
+   static BYTE   rgbSeen[65536 / 8];
+   int           id;
+
+   for (id = SCENE_FIRST_EVENT(); id <= SCENE_LAST_EVENT(); id++)
+   {
+      const EVENTOBJECT   *p = EVENT(id);
+      WORD                 rgwTodo[MAX_SCRIPT_TODO];
+      INT                  nTodo = 0, nWalked = 0;
+
+      if (id == wBlocker || !EVENT_IS_ACTIVE(p) || p->wTriggerMode == kTriggerNone || p->wTriggerScript == 0 ||
+         (TRAINER_GetScriptInfo(p->wTriggerScript)->wFlags & (kTrainerScriptScene | kTrainerScriptStory |
+            kTrainerScriptBattle | kTrainerScriptMove | kTrainerScriptCarry)) != 0 ||
+         (g_Walk.job != kTrainerJobNone && TRAINER_WasTried((WORD)id)))
+      {
+         continue;
+      }
+
+      memset(rgbSeen, 0, sizeof(rgbSeen));
+      rgwTodo[nTodo++] = p->wTriggerScript;
+
+      while (nTodo > 0 && ++nWalked < MAX_SCRIPT_WALK)
+      {
+         const WORD          wCurrent = rgwTodo[--nTodo];
+         const SCRIPTENTRY  *q;
+
+         if (wCurrent == 0 || wCurrent >= gpGlobals->g.nScriptEntry ||
+            (rgbSeen[wCurrent >> 3] & (1 << (wCurrent & 7))))
+         {
+            continue;
+         }
+
+         rgbSeen[wCurrent >> 3] |= (1 << (wCurrent & 7));
+         q = &gpGlobals->g.lprgScriptEntry[wCurrent];
+
+         if (q->wOperation == 0x0049 && q->rgwOperand[0] == wBlocker && (SHORT)q->rgwOperand[1] < kObjStateBlocker)
+         {
+            return (WORD)id;
+         }
+
+         TRAINER_PushNextLines(q, wCurrent, rgwTodo, &nTodo);
+      }
+   }
+
+   return 0;
+}
+
 static VOID
 TRAINER_BuildZones(
    const WORD    *rgwTarget,
@@ -755,7 +978,8 @@ TRAINER_BuildZones(
   Purpose:
 
     List the places around the events of the current scene that a route has to stay out of.
-    With TIER_THROUGH_OBSTACLES those it may be possible to get past go to g_rgObstacle.
+    With TIER_THROUGH_OBSTACLES those it may be possible to get past go to g_rgObstacle,
+    along with what to go up to for that.
 
   Parameters:
 
@@ -784,6 +1008,7 @@ TRAINER_BuildZones(
       const BOOL                 fMonster = (pInfo->wFlags & kTrainerScriptBattle) != 0 && !fDangerous;
       BOOL                       fIsTarget = FALSE;
       int                        iRadius = 0;
+      WORD                       wWho = 0;
 
       for (i = 0; i < nTarget; i++)
       {
@@ -813,10 +1038,22 @@ TRAINER_BuildZones(
          iRadius = TOUCH_RADIUS(p);
       }
 
-      if (iRadius > 0 && iTier >= TIER_THROUGH_OBSTACLES && !fIsTarget && g_nObstacle < MAX_TARGETS &&
-         TRAINER_CanBeGotPast((WORD)id))
+      if (iRadius > 0 && iTier >= TIER_THROUGH_OBSTACLES && !fIsTarget && g_nObstacle < MAX_TARGETS)
       {
-         g_rgObstacle[g_nObstacle].wEvent = (WORD)id;
+         //
+         // What to go up to: the event itself, or a lever somewhere else that clears it.
+         //
+         wWho = TRAINER_CanBeGotPast((WORD)id) ? (WORD)id : 0;
+
+         if (wWho == 0 && p->sState >= kObjStateBlocker)
+         {
+            wWho = TRAINER_FindLever((WORD)id);
+         }
+      }
+
+      if (wWho != 0)
+      {
+         g_rgObstacle[g_nObstacle].wEvent = wWho;
          g_rgObstacle[g_nObstacle].x = p->x;
          g_rgObstacle[g_nObstacle].y = p->y;
          g_rgObstacle[g_nObstacle].iRadius = iRadius;
@@ -2664,6 +2901,51 @@ TRAINER_FailTarget(
 }
 
 static VOID
+TRAINER_PutOn(
+   WORD           wEventObjectID
+)
+/*++
+  Purpose:
+
+    Put on what an event asks someone in the party to wear, the same way the equipment menu
+    does, and tell who wears it now. It stays on, as the player may want it so.
+
+  Parameters:
+
+    [IN]  wEventObjectID - the event.
+
+  Return value:
+
+    None.
+
+--*/
+{
+   WORD    wItem, wRole;
+   INT     i;
+   WCHAR   szText[64];
+
+   if (wEventObjectID == 0)
+   {
+      return;
+   }
+
+   wItem = TRAINER_GetScriptInfo(EVENT(wEventObjectID)->wTriggerScript)->wWear;
+
+   if (wItem == 0 || TRAINER_IsWorn(wItem) || (i = TRAINER_FindWearer(wItem)) < 0)
+   {
+      return;
+   }
+
+   wRole = gpGlobals->rgParty[i].wPlayerRole;
+   gpGlobals->g.rgObject[wItem].item.wScriptOnEquip =
+      PAL_RunTriggerScript(gpGlobals->g.rgObject[wItem].item.wScriptOnEquip, wRole);
+
+   PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR), TR("%ls 裝備了 %ls", "%ls 装备了 %ls"),
+      PAL_GetWord(gpGlobals->g.PlayerRoles.rgwName[wRole]), PAL_GetWord(wItem));
+   TRAINER_SetToast(szText);
+}
+
+static VOID
 TRAINER_Walk(
    VOID
 )
@@ -2776,6 +3058,11 @@ TRAINER_Walk(
       g_Walk.wHop = wHop;
       g_Walk.nStepsLeft = -1;
    }
+
+   //
+   // Now, as getting close may be all it takes to trigger the event.
+   //
+   TRAINER_PutOn((g_Walk.wHop != 0) ? g_Walk.wHop : g_Walk.wTarget);
 
    if (g_Walk.wHop != 0)
    {
@@ -3588,8 +3875,9 @@ TRAINER_ListExits(
 /*++
   Purpose:
 
-    List the exits of the current scene. With none that can simply be walked to, the way on
-    may well be the story, so what leads to another scene as part of it is listed as well.
+    List the exits of the current scene, and what leads to another scene as part of the
+    story or a fight. The way on may well be that, even with exits close by: the ones at
+    the bottom of a dungeon only lead back up, and the way on is its boss.
 
   Parameters:
 
@@ -3601,12 +3889,7 @@ TRAINER_ListExits(
 
 --*/
 {
-   TRAINER_ListTargets(TRAINER_IsExit, TRUE);
-
-   if (g_nTarget == 0 || TARGET_RANK(&g_rgTarget[0]) != 0)
-   {
-      TRAINER_ListTargets(TRAINER_LeadsElsewhere, TRUE);
-   }
+   TRAINER_ListTargets(TRAINER_LeadsElsewhere, TRUE);
 }
 
 static LPCWSTR
@@ -3702,8 +3985,8 @@ TRAINER_ExitLabel(
 {
    const TRAINERSCRIPTINFO   *pInfo;
    INT                        iDist;
-   LPCWSTR                    lpszWhere = L"";
-   WCHAR                      szWhere[24];
+   LPCWSTR                    lpszWhere = L"", lpszWear = L"";
+   WCHAR                      szWhere[24], szWear[24];
 
    if (g_wDeepestScene != 0)
    {
@@ -3735,8 +4018,22 @@ TRAINER_ExitLabel(
       lpszWhere = L"  通往外面";
    }
 
-   PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("場景 %d  %ls%ls%ls", "场景 %d  %ls%ls%ls"),
-      pInfo->wScene, TRAINER_TargetDistanceText(&g_rgTarget[iItem]), lpszWhere,
+   if (pInfo->wWear != 0 && !TRAINER_IsWorn(pInfo->wWear))
+   {
+      const BOOL fMissing = (TRAINER_FindWearer(pInfo->wWear) < 0);
+
+      if (fMissing)
+      {
+         *pbColor = MENUITEM_COLOR_INACTIVE;
+      }
+
+      PAL_swprintf(szWear, sizeof(szWear) / sizeof(WCHAR),
+         fMissing ? L"  缺%ls" : TR("  裝備%ls", "  装备%ls"), PAL_GetWord(pInfo->wWear));
+      lpszWear = szWear;
+   }
+
+   PAL_swprintf(g_szLabel, sizeof(g_szLabel) / sizeof(WCHAR), TR("場景 %d  %ls%ls%ls%ls", "场景 %d  %ls%ls%ls%ls"),
+      pInfo->wScene, TRAINER_TargetDistanceText(&g_rgTarget[iItem]), lpszWhere, lpszWear,
       (pInfo->wFlags & (kTrainerScriptBattle | kTrainerScriptStory)) ? TR("  劇情", "  剧情") :
       ((pInfo->wScene == g_wPreviousScene) ? TR("  來路", "  来路") : L""));
 
@@ -3791,6 +4088,17 @@ TRAINER_ExitMenu(
 
    if (i >= 0)
    {
+      const WORD wWear = TRAINER_GetScriptInfo(EVENT(g_rgTarget[i].wEvent)->wTriggerScript)->wWear;
+
+      if (!TRAINER_CanWear(wWear))
+      {
+         WCHAR szText[64];
+
+         PAL_swprintf(szText, sizeof(szText) / sizeof(WCHAR), TR("需要物品：%ls", "需要物品：%ls"), PAL_GetWord(wWear));
+         TRAINER_SetToast(szText);
+         return TRUE;
+      }
+
       TRAINER_StartJob(kTrainerJobWalk, g_rgTarget[i].wEvent);
       g_Walk.fObstacles = TRUE;
       return TRUE;

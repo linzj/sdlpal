@@ -50,6 +50,7 @@ typedef struct tagTRAINERSCRIPTINFO
    WORD          xMove, yMove;         // the first position it puts the party at
    WORD          xCarry, yCarry;       // the position it walks or carries the party to
    WORD          xRide, yRide;         // the position the event itself ends up at
+   WORD          wWear;                // an item someone in the party has to wear for it to go on
 } TRAINERSCRIPTINFO, *LPTRAINERSCRIPTINFO;
 
 PAL_C_LINKAGE_BEGIN
