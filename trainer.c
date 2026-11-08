@@ -22,7 +22,8 @@
 //
 //  - Story: moves the story on by itself, doing what is below one thing after another: the
 //    treasures and puzzles of each scene, whatever in it may move the story on, the nearest
-//    such thing anywhere else, the bottom of the dungeon, then scenes not seen yet.
+//    such thing anywhere else, the nearest scene where the story goes on as the party comes
+//    in, the bottom of the dungeon, then scenes not seen yet.
 //    Meanwhile the pages of dialogs turn by themselves, and choices wait for the player.
 //    The thorough one gets every treasure of each scene first, the way the walking does.
 //  - Walking: goes to one treasure or exit of the current scene, or collects every treasure,
@@ -238,7 +239,12 @@ static struct
    BOOL            fReached;                          // the walk got there
    BOOL            fThorough;                         // gets every treasure of each scene first
    WORD            wCollected;                        // the scene whose treasures it has just gone for
+   WORD            wEnterScene;                       // the scene it is heading for, as the story goes on there
+   WORD            wEnterScript;                      // and what coming into it runs
 } g_Story;
+
+// A scene goes on the list of what has been tried along with the events, as this.
+#define STORY_SCENE_KEY(s)      ((WORD)(0x8000 | (s)))
 
 static BOOL             g_fWantAnywhere = FALSE;      // look for the events wanted in every scene
 static BOOL             g_fOpenGates = FALSE;         // count the gates whose levers can be reached as open
@@ -1088,6 +1094,40 @@ TRAINER_StoryTried(
 --*/
 {
    const DWORD   dw = ((DWORD)wEventObjectID << 16) | EVENT(wEventObjectID)->wTriggerScript;
+   int           i;
+
+   for (i = 0; i < g_Story.nTried && i < MAX_STORY_TRIED; i++)
+   {
+      if (g_Story.rgdwTried[i] == dw)
+      {
+         return TRUE;
+      }
+   }
+
+   return FALSE;
+}
+
+static BOOL
+TRAINER_SceneStoryTried(
+   WORD           wScene
+)
+/*++
+  Purpose:
+
+    Tell whether moving the story on has already gone into a scene for what coming into it
+    runs now.
+
+  Parameters:
+
+    [IN]  wScene - the scene.
+
+  Return value:
+
+    TRUE if it has been tried.
+
+--*/
+{
+   const DWORD   dw = ((DWORD)STORY_SCENE_KEY(wScene) << 16) | gpGlobals->g.rgScene[wScene - 1].wScriptOnEnter;
    int           i;
 
    for (i = 0; i < g_Story.nTried && i < MAX_STORY_TRIED; i++)
@@ -4599,6 +4639,63 @@ TRAINER_StoryUnseen(
 }
 
 static BOOL
+TRAINER_StoryEnter(
+   VOID
+)
+/*++
+  Purpose:
+
+    Head for the nearest scene where the story goes on as soon as the party comes in, one
+    way out at a time. Someone having their say often leaves the next part of the story for
+    when the party comes back to a scene it has been to, as to the room of the young master
+    of the Liu house. Each scene gets one go for what coming into it runs.
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    TRUE if the party is going.
+
+--*/
+{
+   INT   i, iBest = -1;
+
+   TRAINER_Explore(0, FALSE);
+
+   for (i = 1; i < g_nNode; i++)
+   {
+      const WORD   wScene = g_rgNode[i].wScene;
+      WORD         wEnter;
+
+      if (wScene == 0 || wScene >= MAX_SCENES || wScene == gpGlobals->wNumScene)
+      {
+         continue;
+      }
+
+      wEnter = gpGlobals->g.rgScene[wScene - 1].wScriptOnEnter;
+
+      if (wEnter != 0 && (TRAINER_GetScriptInfo(wEnter)->wFlags & kTrainerScriptStory) != 0 &&
+         !TRAINER_SceneStoryTried(wScene) && (iBest < 0 || g_rgNode[i].iSteps < g_rgNode[iBest].iSteps))
+      {
+         iBest = i;
+      }
+   }
+
+   if (iBest < 0)
+   {
+      return FALSE;
+   }
+
+   TRAINER_StartStoryJob(kTrainerJobWalk, TRAINER_FirstWayTo(iBest));
+   TRAINER_SetPending(g_Walk.wTarget, FALSE);
+   g_Story.wEnterScene = g_rgNode[iBest].wScene;
+   g_Story.wEnterScript = gpGlobals->g.rgScene[g_Story.wEnterScene - 1].wScriptOnEnter;
+   return TRUE;
+}
+
+static BOOL
 TRAINER_StoryCollect(
    VOID
 )
@@ -4662,7 +4759,8 @@ TRAINER_NextStoryStep(
 
     Decide what to do next for moving the story on, and start doing it: the treasures and
     puzzles of the scene first, then whatever in it may move the story on, then the nearest
-    such thing anywhere, then the deepest place of the dungeon, then scenes not seen yet.
+    such thing anywhere, then the nearest scene where the story goes on as the party comes
+    in, then the deepest place of the dungeon, then scenes not seen yet.
     Being decided again after each of them, a treasure that a lever has opened the way to
     gets its turn.
 
@@ -4692,6 +4790,15 @@ TRAINER_NextStoryStep(
    }
 
    g_Story.wPending = 0;
+
+   //
+   // The scene gone to for what coming into it runs has had its go.
+   //
+   if (g_Story.wEnterScene != 0 && g_Story.wEnterScene == gpGlobals->wNumScene)
+   {
+      TRAINER_AddStoryTried(STORY_SCENE_KEY(g_Story.wEnterScene), g_Story.wEnterScript);
+      g_Story.wEnterScene = 0;
+   }
 
    if (g_Story.wScene != gpGlobals->wNumScene)
    {
@@ -4739,7 +4846,7 @@ TRAINER_NextStoryStep(
       return;
    }
 
-   if (TRAINER_StoryHere(TRAINER_IsStoryStep) || TRAINER_StoryElsewhere())
+   if (TRAINER_StoryHere(TRAINER_IsStoryStep) || TRAINER_StoryElsewhere() || TRAINER_StoryEnter())
    {
       return;
    }
