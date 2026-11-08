@@ -2009,7 +2009,8 @@ TRAINER_FloodOnce(
     and for the levers that open what is still in the way, when rgbOpen is given.
 
     Monsters do not count as obstacles, as there will be a battle and then they are gone.
-    People who start a story do, the same as when walking in a scene.
+    People who start a story do, the same as when walking in a scene, and so do people who
+    move the party when talked to.
 
     A raft taken on the way to here is no longer where it was but where it ended up, and
     stepping on it there would only carry the party back. So it is in the way over there.
@@ -2112,6 +2113,18 @@ TRAINER_FloodOnce(
             }
 
             g_nEdge++;
+         }
+
+         //
+         // Someone who takes the party along when talked to stands in the way all the same,
+         // the way PAL_CheckObstacle() has it: the way past may well be to talk to them.
+         //
+         if (p->sState >= kObjStateBlocker && g_nZone < MAX_ZONES)
+         {
+            g_rgZone[g_nZone].x = p->x;
+            g_rgZone[g_nZone].y = p->y;
+            g_rgZone[g_nZone].iRadius = 16;
+            g_nZone++;
          }
 
          continue;
