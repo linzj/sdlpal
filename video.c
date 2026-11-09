@@ -76,13 +76,10 @@ static BOOL gfUseGPU = FALSE;
 SDL_ScaleMode VIDEO_GetScaleMode() {
     static SDL_ScaleMode scaleMode = -1;
     if (scaleMode == -1) {
-        //
-        // Value 2, sharp bilinear scaling, only exists on the SDL_GPU backend.
-        //
-        if (gConfig.pszScaleQuality != NULL && SDL_atoi(gConfig.pszScaleQuality) == 1)
-            scaleMode = SDL_SCALEMODE_LINEAR;
-        else
+        if (gConfig.pszScaleQuality == NULL)
             scaleMode = SDL_SCALEMODE_NEAREST;
+        else
+            scaleMode = SDL_atoi(gConfig.pszScaleQuality);
     }
     return scaleMode;
 }
@@ -1669,6 +1666,34 @@ VIDEO_FadeScreen(
    // Draw the result buffer to the screen as the final step
    //
    VIDEO_UpdateScreen(NULL);
+}
+
+const char *
+VIDEO_GetGPUDriverName(
+   VOID
+)
+/*++
+  Purpose:
+
+    Get the name of the SDL_GPU driver drawing the game, such as "vulkan".
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    The name, or NULL if the game draws through the SDL renderer or OpenGL.
+
+--*/
+{
+#if PAL_HAS_SDL_GPU
+   if (gfUseGPU)
+   {
+      return VIDEO_GPU_GetDriverName();
+   }
+#endif
+   return NULL;
 }
 
 void

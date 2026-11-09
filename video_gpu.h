@@ -54,6 +54,11 @@ VIDEO_GPU_Shutdown(
    VOID
 );
 
+const char *
+VIDEO_GPU_GetDriverName(
+   VOID
+);
+
 VOID
 VIDEO_GPU_SetOverlay(
    SDL_Surface    *pOverlay,

@@ -153,6 +153,11 @@ VIDEO_FadeScreen(
    WORD           wSpeed
 );
 
+const char *
+VIDEO_GetGPUDriverName(
+   VOID
+);
+
 void
 VIDEO_SetWindowTitle(
 	const char*   pszTitle

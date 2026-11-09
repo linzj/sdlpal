@@ -17,8 +17,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
-// video_gpu.c: Renders the game through SDL_GPU, which means Vulkan on Windows, Linux
-//              and Android and Metal on macOS and iOS.
+// video_gpu.c: Renders the game through SDL_GPU, which means Vulkan or Direct3D 12 on
+//              Windows, Vulkan on Linux and Android and Metal on macOS and iOS.
 //
 // The game is still 8-bit, but its surfaces live on the GPU: each one is an R8 texture
 // holding palette indices, and its SDL_Surface has no pixels at all, so there is only one
@@ -33,9 +33,9 @@
 // presented frame is compared with it, as is the palette worked out during a fade, and any
 // difference is logged as [GPUVERIFY]. Use it after changing any drawing code.
 //
-// Only SPIR-V and MSL shaders are provided, so SDL_GPU never selects D3D12. When neither
-// Vulkan nor Metal is usable VIDEO_GPU_Init() fails and video.c falls back to software
-// drawing and the SDL renderer.
+// The shaders are compiled to SPIR-V, MSL and, on Windows, DXIL, so SDL_GPU can pick any of
+// its backends; on Windows it tries Vulkan before Direct3D 12. When none is usable
+// VIDEO_GPU_Init() fails and video.c falls back to software drawing and the SDL renderer.
 //
 
 #include "main.h"
@@ -46,6 +46,14 @@
 
 #include "video_gpu.h"
 #include "video_gpu_shaders.h"
+
+#ifdef VIDEO_GPU_HAS_DXIL
+# define SHADER_FORMATS  (SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_MSL)
+# define DXIL_BLOB(name) name##_dxil, name##_dxil_len
+#else
+# define SHADER_FORMATS  (SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL)
+# define DXIL_BLOB(name) NULL, 0
+#endif
 
 #define SCREEN_WIDTH     320
 #define SCREEN_HEIGHT    200
@@ -2858,23 +2866,41 @@ VIDEO_GPU_CreateShader(
    unsigned int         uiSPIRVLen,
    const unsigned char *pMSL,
    unsigned int         uiMSLLen,
+   const unsigned char *pDXIL,
+   unsigned int         uiDXILLen,
    SDL_GPUShaderStage   stage,
    Uint32               uiSamplers,
    Uint32               uiUniformBuffers
 )
+/*++
+  Purpose:
+
+    Create a shader from the blob the device's backend takes: SPIR-V for Vulkan, DXIL for
+    Direct3D 12 and MSL for Metal. The device was created asking for only the formats that
+    are compiled in, so one of them always fits.
+
+--*/
 {
    SDL_GPUShaderCreateInfo info;
+   SDL_GPUShaderFormat     formats = SDL_GetGPUShaderFormats(gGPU.pDevice);
 
    SDL_zero(info);
    info.stage = stage;
    info.num_samplers = uiSamplers;
    info.num_uniform_buffers = uiUniformBuffers;
 
-   if (SDL_GetGPUShaderFormats(gGPU.pDevice) & SDL_GPU_SHADERFORMAT_SPIRV)
+   if (formats & SDL_GPU_SHADERFORMAT_SPIRV)
    {
       info.format = SDL_GPU_SHADERFORMAT_SPIRV;
       info.code = pSPIRV;
       info.code_size = uiSPIRVLen;
+      info.entrypoint = "main";
+   }
+   else if ((formats & SDL_GPU_SHADERFORMAT_DXIL) && pDXIL != NULL)
+   {
+      info.format = SDL_GPU_SHADERFORMAT_DXIL;
+      info.code = pDXIL;
+      info.code_size = uiDXILLen;
       info.entrypoint = "main";
    }
    else
@@ -2892,7 +2918,8 @@ VIDEO_GPU_CreateShader(
 }
 
 #define VIDEO_GPU_SHADER(name, stage, samplers, uniforms)  \
-   VIDEO_GPU_CreateShader(name##_spv, name##_spv_len, name##_msl, name##_msl_len, (stage), (samplers), (uniforms))
+   VIDEO_GPU_CreateShader(name##_spv, name##_spv_len, name##_msl, name##_msl_len, DXIL_BLOB(name), \
+      (stage), (samplers), (uniforms))
 
 #define VIDEO_GPU_FRAGMENT(name, samplers, uniforms) \
    VIDEO_GPU_SHADER(name, SDL_GPU_SHADERSTAGE_FRAGMENT, (samplers), (uniforms))
@@ -3068,7 +3095,7 @@ VIDEO_GPU_Init(
    const bool fDebug = false;
 #endif
 
-   gGPU.pDevice = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_MSL, fDebug, NULL);
+   gGPU.pDevice = SDL_CreateGPUDevice(SHADER_FORMATS, fDebug, NULL);
    if (gGPU.pDevice == NULL)
    {
       UTIL_LogOutput(LOGLEVEL_WARNING, "SDL_GPU is not available: %s\n", SDL_GetError());
@@ -3077,7 +3104,12 @@ VIDEO_GPU_Init(
 
    gGPU.fVerify = (pszVerify != NULL && pszVerify[0] != '\0' && pszVerify[0] != '0');
 
-   gGPU.iScale = (gConfig.pszScaleQuality != NULL) ? SDL_atoi(gConfig.pszScaleQuality) : kScaleNearest;
+   //
+   // ScaleQuality keeps the values of the SDL renderer, where 2 is SDL_SCALEMODE_PIXELART
+   // (SDL 3.4 and later). Without a ScaleQuality line this backend uses sharp scaling, which
+   // equals nearest at whole-number scales, and leaves the global default of 0 alone.
+   //
+   gGPU.iScale = (gConfig.pszScaleQuality != NULL) ? SDL_atoi(gConfig.pszScaleQuality) : kScaleSharp;
    gGPU.filter = (gGPU.iScale == kScaleLinear) ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
 
    if (gConfig.pszFilter != NULL && gConfig.pszFilter[0] != '\0')
@@ -3161,6 +3193,28 @@ VIDEO_GPU_Init(
    }
 
    return TRUE;
+}
+
+const char *
+VIDEO_GPU_GetDriverName(
+   VOID
+)
+/*++
+  Purpose:
+
+    Get the name of the SDL_GPU driver in use, such as "vulkan", "direct3d12" or "metal".
+
+  Parameters:
+
+    None.
+
+  Return value:
+
+    The name, or NULL if there is no device.
+
+--*/
+{
+   return (gGPU.pDevice != NULL) ? SDL_GetGPUDeviceDriver(gGPU.pDevice) : NULL;
 }
 
 BOOL

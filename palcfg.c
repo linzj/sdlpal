@@ -37,20 +37,6 @@
 #define MAKE_UNSIGNED(defv, minv, maxv) { .uValue = defv }, { .uValue = minv }, { .uValue = maxv }
 #define MAKE_STRING(defv)               { .sValue = defv }, { .sValue = NULL }, { .sValue = NULL }
 
-// The SDL_GPU backend has not been run on a phone or tablet yet, so there it is opt-in.
-#if PAL_HAS_SDL_GPU && !defined(__ANDROID__) && !defined(__IOS__)
-# define DEFAULT_ENABLEGPU TRUE
-#else
-# define DEFAULT_ENABLEGPU FALSE
-#endif
-
-// Sharp bilinear scaling needs a shader, which only the SDL_GPU backend has.
-#if PAL_HAS_SDL_GPU
-# define DEFAULT_SCALEQUALITY "2"
-#else
-# define DEFAULT_SCALEQUALITY "0"
-#endif
-
 #ifdef PLATFORM_DEFAULT_SAMPLERATE
 # define DEFAULT_SAMPLERATE PLATFORM_DEFAULT_SAMPLERATE
 #else
@@ -68,7 +54,7 @@ static const ConfigItem gConfigItems[PALCFG_ALL_MAX] = {
 	{ PALCFG_ENABLEAVIPLAY,     PALCFG_BOOLEAN,  "EnableAviPlay",     13, MAKE_BOOLEAN(TRUE,                          FALSE,                 TRUE) },
 	{ PALCFG_ENABLEGLSL,        PALCFG_BOOLEAN,  "EnableGLSL",        10, MAKE_BOOLEAN(FALSE,                         FALSE,                 TRUE) },
     { PALCFG_ENABLEHDR,         PALCFG_BOOLEAN,  "EnableHDR",          9, MAKE_BOOLEAN(FALSE,                         FALSE,                 TRUE) },
-    { PALCFG_ENABLEGPU,         PALCFG_BOOLEAN,  "EnableGPU",          9, MAKE_BOOLEAN(DEFAULT_ENABLEGPU,               FALSE,                 TRUE) },
+    { PALCFG_ENABLEGPU,         PALCFG_BOOLEAN,  "EnableGPU",          9, MAKE_BOOLEAN(FALSE,                         FALSE,                 TRUE) },
 
 	{ PALCFG_SURROUNDOPLOFFSET, PALCFG_INTEGER,  "SurroundOPLOffset", 17, MAKE_INTEGER(384,                           INT32_MIN,             INT32_MAX) },
 	{ PALCFG_LOGLEVEL,          PALCFG_INTEGER,  "LogLevel",           8, MAKE_INTEGER(PAL_DEFAULT_LOGLEVEL,          LOGLEVEL_MIN,          LOGLEVEL_MAX) },
@@ -99,7 +85,7 @@ static const ConfigItem gConfigItems[PALCFG_ALL_MAX] = {
 	{ PALCFG_RIXEXTRAINIT,      PALCFG_STRING,   "RIXExtraInit",      12, MAKE_STRING(NULL) },
 	{ PALCFG_MIDICLIENT,        PALCFG_STRING,   "MIDIClient",        10, MAKE_STRING(NULL) },
 	{ PALCFG_SOUNDBANK,         PALCFG_STRING,   "SoundBank",          9, MAKE_STRING(NULL) },
-	{ PALCFG_SCALEQUALITY,      PALCFG_STRING,   "ScaleQuality",      12, MAKE_STRING(DEFAULT_SCALEQUALITY) },
+	{ PALCFG_SCALEQUALITY,      PALCFG_STRING,   "ScaleQuality",      12, MAKE_STRING("0") },
 	{ PALCFG_SHADER,            PALCFG_STRING,   "Shader",             6, MAKE_STRING(NULL) },
 	{ PALCFG_FILTER,            PALCFG_STRING,   "Filter",             6, MAKE_STRING(NULL) },
 };
@@ -582,7 +568,6 @@ PAL_LoadConfig(
 	if (!gConfig.pszSavePath) gConfig.pszSavePath = gConfig.pszGamePath ? strdup(gConfig.pszGamePath) : strdup(PAL_SAVE_PREFIX);
 	if (!gConfig.pszGamePath) gConfig.pszGamePath = strdup(PAL_PREFIX);
     if (!gConfig.pszShaderPath) gConfig.pszShaderPath = strdup(gConfig.pszGamePath);
-	if (!gConfig.pszScaleQuality) gConfig.pszScaleQuality = strdup(DEFAULT_SCALEQUALITY);
 	gConfig.eMusicType = eMusicType;
 	gConfig.eMIDISynth = eMIDISynthType;
 	gConfig.eCDType = eCDType;

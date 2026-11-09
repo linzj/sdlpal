@@ -417,6 +417,13 @@ PAL_RNGBlitToSurface(
       return -1;
    }
 
+   //
+   // A surface on the GPU has no pixels, and the frame only changes some of its pixels, so
+   // it is decoded into an image saying which (two bytes per pixel) and drawn over the
+   // surface like a sprite. A software surface has pixels, and BeginPartialImage() returns
+   // NULL for it. Only with SDLPAL_GPU_VERIFY=1 does a surface have both, and then both
+   // run, the pixels getting the software result to compare with.
+   //
    pImage = VIDEO_GPU_BeginPartialImage(lpDstSurface);
    if (pImage != NULL)
    {

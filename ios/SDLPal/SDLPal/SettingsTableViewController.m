@@ -268,7 +268,7 @@ typedef void(^SelectedBlock)(NSString *selected);
             rows = 2;
             break;
         case 2:
-            rows = 5;
+            rows = 6;
             break;
         case 3:
             rows = [toggleGLSL isOn] ? 3 : 1;
@@ -293,8 +293,19 @@ typedef void(^SelectedBlock)(NSString *selected);
     }
     return rows;
 }
+// GLSL filters are drawn through OpenGL, so the game cannot use the GPU backend with them.
+// Turning on either switch turns the other off.
 - (IBAction)GLSLToggled:(id)sender {
+    if (toggleGLSL.isOn) {
+        [toggleGPU setOn:NO animated:YES];
+    }
     [self.tableView reloadData];
+}
+- (IBAction)GPUToggled:(id)sender {
+    if (toggleGPU.isOn && toggleGLSL.isOn) {
+        [toggleGLSL setOn:NO animated:YES];
+        [self.tableView reloadData];
+    }
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -414,7 +425,7 @@ typedef void(^SelectedBlock)(NSString *selected);
     
     toggleStereo.on         = gConfig.iAudioChannels == 2;
     toggleSurroundOPL.on    = gConfig.fUseSurroundOPL;
-    toggleGPU.on            = gConfig.fEnableGPU;
+    toggleGPU.on            = gConfig.fEnableGPU && !gConfig.fEnableGLSL; // with both on the game uses GLSL
     toggleGLSL.on           = gConfig.fEnableGLSL;
     toggleHDR.on            = gConfig.fEnableHDR;
     
@@ -456,10 +467,12 @@ typedef void(^SelectedBlock)(NSString *selected);
     gConfig.fUseTouchOverlay = toggleTouchScreenOverlay.isOn;
 
     // The toggle only says whether to use bilinear scaling, so any other setting stays
-    // unless the toggle was changed.
+    // unless the toggle was changed. Turning it off removes the setting, which means nearest
+    // for the SDL renderer, as 0 does, and sharp bilinear for the SDL_GPU backend.
     BOOL wasSmooth = gConfig.pszScaleQuality && atoi(gConfig.pszScaleQuality) == 1;
     if (toggleSmoothScaling.on != wasSmooth) {
-        gConfig.pszScaleQuality = strdup(toggleSmoothScaling.on ? "1" : PAL_GetConfigString(PALCFG_SCALEQUALITY, YES));
+        free(gConfig.pszScaleQuality);
+        gConfig.pszScaleQuality = toggleSmoothScaling.on ? strdup("1") : NULL;
     }
     
     gConfig.fEnableGPU = toggleGPU.isOn;

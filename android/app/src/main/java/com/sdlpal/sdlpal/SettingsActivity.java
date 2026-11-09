@@ -158,10 +158,24 @@ public class SettingsActivity extends AppCompatActivity {
             }
         });
 
+        // GLSL filters are drawn through OpenGL, so the game cannot use the GPU backend with them.
+        // Turning on either switch turns the other off.
         ((SwitchCompat)findViewById(R.id.swEnableGLSL)).setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
                 findViewById(R.id.glslBlock).setVisibility(isChecked ? View.VISIBLE : View.GONE);
+                if (isChecked) {
+                    ((SwitchCompat)findViewById(R.id.swEnableGPU)).setChecked(false);
+                }
+            }
+        });
+
+        ((SwitchCompat)findViewById(R.id.swEnableGPU)).setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                if (isChecked) {
+                    ((SwitchCompat)findViewById(R.id.swEnableGLSL)).setChecked(false);
+                }
             }
         });
 
@@ -431,7 +445,8 @@ public class SettingsActivity extends AppCompatActivity {
         ((SwitchCompat)findViewById(R.id.swStereo)).setChecked(getConfigBoolean(Stereo, false));
         ((SwitchCompat)findViewById(R.id.swEnableGLSL)).setChecked(getConfigBoolean(EnableGLSL, false));
         ((SwitchCompat)findViewById(R.id.swEnableHDR)).setChecked(getConfigBoolean(EnableHDR, false));
-        ((SwitchCompat)findViewById(R.id.swEnableGPU)).setChecked(getConfigBoolean(EnableGPU, false));
+        // With both on the game uses GLSL, so that is what the switches show.
+        ((SwitchCompat)findViewById(R.id.swEnableGPU)).setChecked(getConfigBoolean(EnableGPU, false) && !getConfigBoolean(EnableGLSL, false));
 
         ((AppCompatSpinner)findViewById(R.id.spLogLevel)).setSelection(getConfigInt(LogLevel, false));
         ((AppCompatSpinner)findViewById(R.id.spSample)).setSelection(findMatchedIntIndex(getConfigInt(SampleRate, false), AudioSampleRates, 3));

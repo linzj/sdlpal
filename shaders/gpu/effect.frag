@@ -6,6 +6,13 @@
 
 layout(location = 0) out vec4 o_index;
 
+// Direct3D 12 pairs a pixel shader's inputs with the vertex shader's outputs by position,
+// so there this shader has to take fullscreen.vert's v_texCoord first, unused as it is.
+// compile_shaders.sh defines DXIL only when compiling for Direct3D 12.
+#ifdef DXIL
+layout(location = 0) in vec2 v_texCoord;
+#endif
+
 layout(set = 2, binding = 0) uniform sampler2D u_first;
 layout(set = 2, binding = 1) uniform sampler2D u_second;
 

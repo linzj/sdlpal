@@ -107,18 +107,22 @@
 #                Note: SDLPal only support the codec the original distribution uses.
 #EnableAviPlay=0
 
-# EnableGPU: Draw through SDL_GPU, which is Vulkan on Windows, Linux and Android and Metal on macOS and
-#            iOS. Enabled by default. Set to 0 if your graphics driver misbehaves. The game falls back
-#            to the SDL renderer by itself when Vulkan or Metal is not available, and always uses
-#            OpenGL/GLES when EnableGLSL=1. Off by default on Android and iOS, where it has
-#            not been run on a device yet; their settings screens have a switch for it.
-#EnableGPU=1
+# EnableGPU: Draw through SDL_GPU, which uses Vulkan or Direct3D 12 on Windows, Vulkan on Linux and
+#            Android and Metal on macOS and iOS. Off by default. The game falls back to the SDL
+#            renderer by itself when none of these is usable. On Windows Vulkan comes first; set the
+#            environment variable SDL_GPU_DRIVER=direct3d12 to use Direct3D 12 instead.
+#            EnableGPU and EnableGLSL exclude each other: with both set to 1 and a valid Shader,
+#            EnableGLSL wins and the game draws through OpenGL/GLES. The settings screens on Android
+#            and iOS turn one off when the other is turned on. On desktop systems the window title
+#            shows which SDL_GPU driver is in use.
+#EnableGPU=0
 
-# ScaleQuality: How to stretch the picture, only available when EnableGLSL=0:
-#               0 = nearest, 1 = bilinear, 2 = sharp bilinear (hard pixels of even width at any window
-#               size, the same as nearest at whole-number scales; needs EnableGPU=1, otherwise it
-#               means nearest). Defaults to 2 where SDL_GPU is compiled in.
-#ScaleQuality=2
+# ScaleQuality: Indicates whether use bilinear filtering when stretching, only avilable when EnableGLSL=0
+#               In other case the shader handles it.
+#               With EnableGPU=1: 0 = nearest, 1 = bilinear, 2 = sharp bilinear (hard pixels of even
+#               width at any window size, the same as nearest at whole-number scales). Without a
+#               ScaleQuality line the SDL_GPU backend uses sharp bilinear.
+#ScaleQuality=0
 
 # Filter: A built-in filter drawn through SDL_GPU, needs EnableGPU=1: reverse, cartoon or crt.
 #         Use EnableGLSL and Shader for RetroArch filters instead.
@@ -126,6 +130,7 @@
 
 # EnableGLSL: Recently a EXPERIMENTAL hacked OpenGL/GLES based backend was introduced, which
 #             accepts RetroArch GLSL Shaders. This option MUST be used with Shader option.
+#             Takes precedence over EnableGPU.
 #EnableGLSL=0
 
 # Shader: Path to RetroArch GLSL Shaders( see https://github.com/libretro/glsl-shaders ).
